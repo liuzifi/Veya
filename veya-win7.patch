@@ -1,6 +1,6 @@
 --- a/veya-windows/src/platform/window_place.rs
 +++ b/veya-windows/src/platform/window_place.rs
-@@ -1,12 +1,42 @@
+@@ -1,12 +1,45 @@
  //! Place a logical-size window in the cursor monitor's physical work area.
  
 +use windows::core::{s, w, HRESULT};
@@ -24,7 +24,10 @@
 +unsafe fn monitor_dpi(monitor: HMONITOR) -> u32 {
 +    if let Ok(lib) = LoadLibraryW(w!("shcore.dll")) {
 +        if let Some(proc_addr) = GetProcAddress(lib, s!("GetDpiForMonitor")) {
-+            let get_dpi = std::mem::transmute::<unsafe extern "system" fn() -> isize, GetDpiForMonitorFn>(proc_addr);
++            let get_dpi = std::mem::transmute::<
++                unsafe extern "system" fn() -> isize,
++                GetDpiForMonitorFn,
++            >(proc_addr);
 +            let (mut dpi_x, mut dpi_y) = (0u32, 0u32);
 +            // 0 == MDT_EFFECTIVE_DPI
 +            if get_dpi(monitor, 0, &mut dpi_x, &mut dpi_y).is_ok() && dpi_x != 0 {
@@ -45,7 +48,7 @@
  #[derive(Clone, Copy, Debug)]
  pub struct StartupPlacement {
      pub logical_size: (f32, f32),
-@@ -27,9 +57,7 @@
+@@ -27,9 +60,7 @@
              return None;
          }
  
@@ -58,11 +61,12 @@
          Some(fit_and_center(
 --- a/scripts/build-installer.ps1
 +++ b/scripts/build-installer.ps1
-@@ -1,13 +1,35 @@
+@@ -1,13 +1,36 @@
 -param([string]$Nsis = '')
 +param(
 +    [string]$Nsis = '',
 +    # Build for Windows 7 SP1 (x86_64-win7-windows-msvc, nightly + build-std, static CRT).
++    # The installer is still written to artifacts\veya-setup.exe, like the normal build.
 +    [switch]$Win7
 +)
  
@@ -97,7 +101,7 @@
  
  if (-not $Nsis) {
      $Nsis = @(
-@@ -24,7 +46,7 @@
+@@ -24,7 +47,7 @@
  if ($LASTEXITCODE -ne 0) { throw 'cargo metadata failed' }
  $version = (($metadata | ConvertFrom-Json).packages | Where-Object name -eq 'veya-desktop').version
  if (-not $version) { throw 'veya-desktop version not found' }
@@ -106,14 +110,3 @@
  if (-not (Test-Path -LiteralPath $binary)) { throw "Binary missing: $binary" }
  & (Join-Path $PSScriptRoot 'assert-gui-binary.ps1') -Binary $binary
  $iconHash = (Get-FileHash -LiteralPath (Join-Path $root 'icons\icon.ico') -Algorithm SHA256).Hash.ToLowerInvariant()
-@@ -34,4 +56,10 @@
- 
- $installer = Join-Path $artifacts 'veya-setup.exe'
- if (-not (Test-Path -LiteralPath $installer)) { throw "Installer missing: $installer" }
-+if ($Win7) {
-+    # veya.nsi always writes veya-setup.exe; rename so it does not collide with the normal build.
-+    $win7Installer = Join-Path $artifacts 'veya-win7-setup.exe'
-+    Move-Item -LiteralPath $installer -Destination $win7Installer -Force
-+    $installer = $win7Installer
-+}
- Write-Host "Built $installer"
