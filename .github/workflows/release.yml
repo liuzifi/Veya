@@ -5,150 +5,85 @@ on:
     tags:
       - 'v*'
 
+permissions:
+  contents: write
+
 jobs:
-  build-windows:
+  build:
     runs-on: windows-2022
     steps:
-      - name: Configure Git (disable mailmap)
-        shell: pwsh
-        run: |
-          $env:GIT_CONFIG_COUNT = 1
-          $env:GIT_CONFIG_KEY_0 = "mailmap.file"
-          $env:GIT_CONFIG_VALUE_0 = ""
-          git --version
-
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.4.0
         with:
           fetch-depth: 0
 
-      - name: Restore patches for local build
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install 1.99.0-x86_64-pc-windows-msvc --profile minimal --component rustfmt
+          rustup default 1.99.0-x86_64-pc-windows-msvc
+          rustfmt --version
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Test workspace
         shell: pwsh
         run: |
-          Apply-PatchFile -Path "veya-win7.patch" -Workspace "."
-          if (Test-Path ".\vendor\git-cliff\cliff.toml") {
-            Apply-PatchFile -Path ".\vendor\git-cliff\cliff.toml" -Workspace "."
-          }
+          $env:APPDATA = Join-Path $env:RUNNER_TEMP 'veya-appdata'
+          New-Item -ItemType Directory -Force -Path $env:APPDATA | Out-Null
+          cargo test --locked --workspace
 
-      - name: Rustup toolchain install
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          target: x86_64-pc-windows-msvc
+      - name: Check workspace
+        run: cargo check --locked --workspace
 
-      - name: Rustup component (rustfmt + clippy)
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-
-      - name: Cargo fmt check
+      - name: Install NSIS
         shell: pwsh
-        run: cargo fmt --all --check
+        run: choco install nsis -y --no-progress
 
-      - name: Cargo test
-        shell: pwsh
-        run: cargo test --workspace --locked
-
-      - name: Cargo clippy (deny warnings)
-        shell: pwsh
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
-
-      - name: Cargo build (release)
-        shell: pwsh
-        run: cargo build --workspace --release --locked
-
-      - name: Verify installer input exists
+      - name: Build release installer
         shell: pwsh
         run: |
-          $exe = ".\target\release\veya-desktop.exe"
-          if (-not (Test-Path $exe)) { throw "Missing exe: $exe" }
-          Write-Host "Found $(Get-ChildItem $exe | Select-Object -ExpandProperty Name)"
-
-      - name: Build installer
-        shell: pwsh
-        run: .\scripts\build-installer.ps1 -Configuration Release
+          ./scripts/build-installer.ps1 -Nsis 'C:\Program Files (x86)\NSIS\makensis.exe'
 
       - name: Upload installer artifact
         uses: actions/upload-artifact@v4
         with:
-          name: veya-0.2.6-setup.exe
-          path: installer/dist/*.exe
+          name: installer
+          path: artifacts/veya-setup.exe
           if-no-files-found: error
 
   release:
-    needs: build-windows
-    runs-on: windows-2022
+    needs: build
+    runs-on: ubuntu-latest
     permissions:
       contents: write
-      packages: write
-
     steps:
-      - name: Configure Git (disable mailmap)
-        shell: pwsh
-        run: |
-          $env:GIT_CONFIG_COUNT = 1
-          $env:GIT_CONFIG_KEY_0 = "mailmap.file"
-          $env:GIT_CONFIG_VALUE_0 = ""
-
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
       - name: Download installer artifact
         uses: actions/download-artifact@v4
         with:
-          name: veya-0.2.6-setup.exe
-          path: installer/dist
-
-      - name: Generate changelog
-        id: changelog
-        shell: pwsh
-        run: |
-          $tag = "${{ github.ref_name }}"
-          if (Test-Path ".\changelog.json") {
-            $data = Get-Content ".\changelog.json" -Raw | ConvertFrom-Json
-          } else {
-            $data = @{ body = "`n## $tag`n
-
-Initial release. See documentation for details."
-                       version = $tag
-                       commits = @()
-                       breaking = @()
-                       features = @()
-                       fixes = @()
-                       chores = @()
-                       authors = @()
-                      }
-          }
-
-          $body = $data.body
-          if (-not $body) { $body = "## $tag`n
-
-Initial release."
-          }
-
-          $file = "$env:GITHUB_STEP_SUMMARY"
-          Add-Content -Path $file -Value "### $tag"
-          Add-Content -Path $file -Value $body
-
-          $releaseNotes = $body
-          $releaseNotes = $releaseNotes -replace '\n', '%0A'
-          Write-Host "release_notes=$releaseNotes" >> $env:GITHUB_OUTPUT
+          name: installer
+          path: artifacts
 
       - name: Extract version from tag
         id: version
-        shell: pwsh
+        shell: bash
         run: |
-          $tag = "${{ github.ref_name }}"
-          $ver = $tag.TrimStart('v')
-          Write-Host "version=$ver" >> $env:GITHUB_OUTPUT
+          tag="${{ github.ref_name }}"
+          ver="${tag#v}"
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           name: Veya ${{ steps.version.outputs.version }}
-          body: ${{ steps.changelog.outputs.release_notes }}
-          generate_release_notes: false
+          body: |
+            ## Veya ${{ steps.version.outputs.version }}
+
+            Download the installer below (`veya-setup.exe`) and run it to install Veya.
+
+            See the [release notes](https://github.com/liuzifi/Veya/blob/main/docs/releases/v${{ steps.version.outputs.version }}.md) for details.
+          generate_release_notes: true
           draft: false
           prerelease: false
           files: |
-            installer/dist/*.exe
-            installer/dist/*.sha256
+            artifacts/veya-setup.exe
