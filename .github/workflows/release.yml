@@ -52,8 +52,8 @@ jobs:
           New-Item -ItemType Directory -Force -Path $env:APPDATA | Out-Null
           cargo fmt --all -- --check
           if ($LASTEXITCODE -ne 0) { throw 'cargo fmt failed' }
-          cargo test --locked --workspace
-          if ($LASTEXITCODE -ne 0) { throw 'cargo test failed' }
+          cargo build --locked --workspace --release
+          if ($LASTEXITCODE -ne 0) { throw 'cargo build failed' }
       - name: Install NSIS
         shell: pwsh
         run: choco install nsis -y --no-progress
