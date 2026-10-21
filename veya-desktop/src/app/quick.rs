@@ -398,7 +398,7 @@ impl App {
             button(meta("管理历史").size(12))
                 .style(theme::action_button)
                 .on_press(Message::OpenManager),
-            button(icons::icon(Icon::Close, theme::MUTED, 12.0))
+            button(icons::icon(Icon::Close, theme::MUTED(), 12.0))
                 .style(theme::win_button)
                 .on_press(Message::QuickDismiss { restore: true }),
         ]
@@ -417,7 +417,7 @@ impl App {
         let list: Element<'_, Message> = if pending || self.state.cards.is_empty() {
             container(
                 column![
-                    icons::icon(Icon::History, theme::FAINT, 28.0),
+                    icons::icon(Icon::History, theme::FAINT(), 28.0),
                     meta(if pending {
                         "正在读取历史…"
                     } else if self.search.is_empty() {
@@ -446,7 +446,7 @@ impl App {
                 let mut metadata =
                     row![meta(source).size(11), meta(card.relative_time()).size(11)].spacing(8);
                 if card.pinned {
-                    metadata = metadata.push(icons::icon(Icon::Pin, theme::ACCENT, 11.0));
+                    metadata = metadata.push(icons::icon(Icon::Pin, theme::ACCENT(), 11.0));
                 }
                 let content = row![
                     history::card_leading_visual(card, 34.0),
@@ -502,7 +502,7 @@ impl App {
         let mut layout =
             column![header, search, theme::hdivider(), list, theme::hdivider()].spacing(9);
         if let Some(error) = &quick.error {
-            layout = layout.push(meta(error.clone()).size(12).color(theme::WARN));
+            layout = layout.push(meta(error.clone()).size(12).color(theme::WARN()));
         } else if busy {
             layout = layout.push(meta("正在粘贴，请松开按键…").size(12));
         }

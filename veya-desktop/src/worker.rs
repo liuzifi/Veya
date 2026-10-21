@@ -12,7 +12,10 @@ use veya_windows::hotkey::Hotkey;
 use veya_windows::platform::{enrich_clipboard, enrich_paste, PlatformEvent, WindowSignal};
 use veya_windows::{write_payload, ClipboardWriteError};
 
-use crate::capture::{CardPayloadView, CardView, HistoryQuery, Retention, SharedUi, UiState};
+use crate::capture::{
+    CardPayloadView, CardView, ExpiryConfig, HistoryQuery, MaxItemsConfig, Retention, SharedUi,
+    ThemeMode, UiState,
+};
 use crate::format::now_ms;
 
 #[path = "history_loader.rs"]
@@ -30,6 +33,9 @@ pub enum WorkerCmd {
     ClearHistory,
     SetTracking { on: bool, request_id: Option<u64> },
     SetRetention(Retention),
+    SetThemeMode(ThemeMode),
+    SetMaxItems(MaxItemsConfig),
+    SetExpiry(ExpiryConfig),
     ExcludeApp { exe: String },
     UnexcludeApp { exe: String },
     DeleteRecord { sequences: Vec<u32> },
@@ -352,6 +358,9 @@ fn publish(
     hotkey_selected: Hotkey,
     hotkey_active: Hotkey,
     hotkey_error: Option<String>,
+    theme_mode: ThemeMode,
+    max_items: MaxItemsConfig,
+    expiry: ExpiryConfig,
 ) {
     history_page.refresh(store, history_query, history_active);
     let status_note = history_page.error.clone().unwrap_or(status_note);
@@ -380,6 +389,9 @@ fn publish(
         hotkey_selected,
         hotkey_active,
         hotkey_error,
+        theme_mode,
+        max_items,
+        expiry,
     };
     if let Ok(mut guard) = shared.lock() {
         snap.revision = guard.revision.wrapping_add(1);
@@ -500,6 +512,42 @@ fn run_worker(
         let mut hotkey_active = Hotkey::Disabled;
         let mut hotkey_error = None;
         let mut last_purge_ms = 0i64;
+        let mut theme_mode = store
+            .get_setting("theme")
+            .ok()
+            .flatten()
+            .map(|s| ThemeMode::from_key(&s))
+            .unwrap_or_default();
+        let mut max_items = MaxItemsConfig {
+            enabled: store
+                .get_setting("max_items_enabled")
+                .ok()
+                .flatten()
+                .map(|s| s == "1")
+                .unwrap_or(false),
+            count: store
+                .get_setting("max_items")
+                .ok()
+                .flatten()
+                .and_then(|s| s.parse::<u32>().ok())
+                .map(|n| n.max(1).min(100_000))
+                .unwrap_or(1000),
+        };
+        let mut expiry = ExpiryConfig {
+            enabled: store
+                .get_setting("expiry_enabled")
+                .ok()
+                .flatten()
+                .map(|s| s == "1")
+                .unwrap_or(false),
+            days: store
+                .get_setting("expiry_days")
+                .ok()
+                .flatten()
+                .and_then(|s| s.parse::<u32>().ok())
+                .map(|n| n.max(1).min(3650))
+                .unwrap_or(90),
+        };
 
         publish(
             &shared,
@@ -518,6 +566,9 @@ fn run_worker(
             hotkey_selected,
             hotkey_active,
             hotkey_error.clone(),
+            theme_mode,
+            max_items,
+            expiry,
         );
 
         let pump = std::thread::Builder::new()
@@ -726,22 +777,68 @@ fn run_worker(
                             veya_windows::platform::request_hotkey_recording(false);
                         }
                     }
+                    WorkerCmd::SetThemeMode(mode) => {
+                        theme_mode = mode;
+                        let _ = store.set_setting("theme", mode.as_key());
+                    }
+                    WorkerCmd::SetMaxItems(config) => {
+                        max_items = config;
+                        let _ =
+                            store.set_setting("max_items_enabled", if config.enabled { "1" } else { "0" });
+                        let _ = store.set_setting("max_items", &config.count.to_string());
+                        if config.enabled {
+                            if store.trim_to_max_count(config.count as usize).unwrap_or(0) > 0 {
+                                history_page.invalidate();
+                                discard_purged_record(&store, &mut flow);
+                            }
+                        }
+                    }
+                    WorkerCmd::SetExpiry(config) => {
+                        expiry = config;
+                        let _ =
+                            store.set_setting("expiry_enabled", if config.enabled { "1" } else { "0" });
+                        let _ = store.set_setting("expiry_days", &config.days.to_string());
+                        if config.enabled {
+                            let cutoff = now_ms() - config.days as i64 * 86_400_000;
+                            if store.purge_older_than(cutoff).unwrap_or(0) > 0 {
+                                history_page.invalidate();
+                                discard_purged_record(&store, &mut flow);
+                            }
+                        }
+                    }
                 }
             }
 
             dirty |= history_page.receive();
 
-            // Periodic retention purge (default 30 days; honors setting).
+            // Periodic retention purge (default 30 days; honors settings).
             let now = now_ms();
             if now - last_purge_ms > 60_000 {
                 last_purge_ms = now;
+                let mut purged = false;
+                // Built-in retention policy (Day1/Day7/Day30/Never).
                 if let Some(cutoff) = retention.cutoff_ms(now) {
-                    let removed = store.purge_older_than(cutoff).unwrap_or(0);
-                    if removed > 0 {
-                        history_page.invalidate();
-                        discard_purged_record(&store, &mut flow);
-                        dirty = true;
+                    if store.purge_older_than(cutoff).unwrap_or(0) > 0 {
+                        purged = true;
                     }
+                }
+                // Custom expiry days (when enabled, overrides retention cutoff semantics).
+                if expiry.enabled {
+                    let cutoff = now - expiry.days as i64 * 86_400_000;
+                    if store.purge_older_than(cutoff).unwrap_or(0) > 0 {
+                        purged = true;
+                    }
+                }
+                // Max items count trim.
+                if max_items.enabled {
+                    if store.trim_to_max_count(max_items.count as usize).unwrap_or(0) > 0 {
+                        purged = true;
+                    }
+                }
+                if purged {
+                    history_page.invalidate();
+                    discard_purged_record(&store, &mut flow);
+                    dirty = true;
                 }
             }
 
@@ -763,6 +860,9 @@ fn run_worker(
                     hotkey_selected,
                     hotkey_active,
                     hotkey_error.clone(),
+                    theme_mode,
+                    max_items,
+                    expiry,
                 );
             }
 
@@ -875,6 +975,9 @@ fn run_worker(
                     hotkey_selected,
                     hotkey_active,
                     hotkey_error.clone(),
+                    theme_mode,
+                    max_items,
+                    expiry,
                 );
             }
         }

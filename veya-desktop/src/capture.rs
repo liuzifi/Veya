@@ -105,6 +105,69 @@ impl CardView {
     }
 }
 
+/// UI theme mode (dark / light).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ThemeMode {
+    #[default]
+    Dark,
+    Light,
+}
+
+impl ThemeMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            ThemeMode::Dark => "暗色",
+            ThemeMode::Light => "亮色",
+        }
+    }
+
+    pub fn as_key(self) -> &'static str {
+        match self {
+            ThemeMode::Dark => "dark",
+            ThemeMode::Light => "light",
+        }
+    }
+
+    pub fn from_key(s: &str) -> Self {
+        match s {
+            "light" => ThemeMode::Light,
+            _ => ThemeMode::Dark,
+        }
+    }
+}
+
+/// Maximum-saved-items setting (checkbox + count).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MaxItemsConfig {
+    pub enabled: bool,
+    pub count: u32,
+}
+
+impl Default for MaxItemsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            count: 1000,
+        }
+    }
+}
+
+/// Custom expiry-days setting (checkbox + days).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExpiryConfig {
+    pub enabled: bool,
+    pub days: u32,
+}
+
+impl Default for ExpiryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            days: 90,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Retention {
     Day1,
@@ -176,6 +239,9 @@ pub struct UiState {
     pub hotkey_selected: Hotkey,
     pub hotkey_active: Hotkey,
     pub hotkey_error: Option<String>,
+    pub theme_mode: ThemeMode,
+    pub max_items: MaxItemsConfig,
+    pub expiry: ExpiryConfig,
 }
 
 pub type SharedUi = Arc<Mutex<UiState>>;

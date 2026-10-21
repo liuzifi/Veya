@@ -14,7 +14,7 @@ impl App {
         let mut tabs = row![].spacing(6);
         for f in filters {
             let selected = self.filter == f;
-            let icon_color = if selected { theme::INK } else { theme::MUTED };
+            let icon_color = if selected { theme::INK() } else { theme::MUTED() };
             let tab = button(
                 row![
                     icons::icon(f.icon(), icon_color, 13.0),
@@ -29,9 +29,9 @@ impl App {
         }
 
         let pin_color = if self.pinned_only {
-            theme::INK
+            theme::INK()
         } else {
-            theme::MUTED
+            theme::MUTED()
         };
         tabs = tabs.push(
             button(
@@ -65,7 +65,7 @@ impl App {
         let compact = self.list_density == ListDensity::Compact;
         let density_button = button(icons::icon(
             Icon::List,
-            if compact { theme::INK } else { theme::MUTED },
+            if compact { theme::INK() } else { theme::MUTED() },
             15.0,
         ))
         .on_press(Message::ToggleListDensity)
@@ -145,11 +145,11 @@ impl App {
             };
             container(
                 column![
-                    icons::icon(icon, theme::FAINT, 28.0),
+                    icons::icon(icon, theme::FAINT(), 28.0),
                     Space::with_height(10.0),
                     body(title).size(14).font(crate::font::name_font()),
                     Space::with_height(4.0),
-                    meta(sub).size(13).color(theme::FAINT),
+                    meta(sub).size(13).color(theme::FAINT()),
                 ]
                 .align_x(Alignment::Center),
             )
@@ -209,14 +209,14 @@ impl App {
         }
 
         let previous_color = if page > 0 && !pending {
-            theme::MUTED
+            theme::MUTED()
         } else {
-            theme::FAINT
+            theme::FAINT()
         };
         let next_color = if self.state.history_has_next && !pending {
-            theme::MUTED
+            theme::MUTED()
         } else {
-            theme::FAINT
+            theme::FAINT()
         };
 
         let mut previous = button(text("上一页").size(12).color(previous_color))
@@ -242,7 +242,7 @@ impl App {
                     format!("第 {} 页 · 每页 25 条", page + 1)
                 })
                 .size(11)
-                .color(theme::FAINT),
+                .color(theme::FAINT()),
                 next,
             ]
             .spacing(8)
@@ -282,12 +282,12 @@ impl App {
                     card.relative_time()
                 ))
                 .size(10)
-                .color(theme::MUTED),
+                .color(theme::MUTED()),
             ]
             .spacing(5)
             .align_y(Alignment::Center);
             if card.pinned {
-                source_meta = source_meta.push(icons::icon(Icon::Pin, theme::ACCENT, 10.0));
+                source_meta = source_meta.push(icons::icon(Icon::Pin, theme::ACCENT(), 10.0));
             }
             let head = row![
                 card_leading_visual(card, 29.0),
@@ -336,12 +336,12 @@ impl App {
 
         let mut source_meta = row![
             icons::app_avatar::<Message>(&card.source_app, 15.0),
-            meta(time_bit).size(11).color(theme::MUTED),
+            meta(time_bit).size(11).color(theme::MUTED()),
         ]
         .spacing(6)
         .align_y(Alignment::Center);
         if card.pinned {
-            source_meta = source_meta.push(icons::icon(Icon::Pin, theme::ACCENT, 11.0));
+            source_meta = source_meta.push(icons::icon(Icon::Pin, theme::ACCENT(), 11.0));
         }
 
         let head = row![
@@ -353,9 +353,9 @@ impl App {
                     .shaping(text::Shaping::Advanced),
                 source_meta,
                 meta(used_line).size(11).color(if card.has_paste_activity {
-                    theme::MUTED
+                    theme::MUTED()
                 } else {
-                    theme::FAINT
+                    theme::FAINT()
                 }),
             ]
             .spacing(3)
@@ -395,7 +395,7 @@ impl App {
         };
         let pin = button(
             row![
-                icons::icon(Icon::Pin, theme::MUTED, 14.0),
+                icons::icon(Icon::Pin, theme::MUTED(), 14.0),
                 text(pin_label).size(12),
             ]
             .spacing(9)
@@ -410,7 +410,7 @@ impl App {
         .style(theme::context_menu_item(false));
         let delete = button(
             row![
-                icons::icon(Icon::Trash, theme::DANGER, 14.0),
+                icons::icon(Icon::Trash, theme::DANGER(), 14.0),
                 text("删除").size(12),
             ]
             .spacing(9)

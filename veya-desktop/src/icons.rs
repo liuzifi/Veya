@@ -265,8 +265,8 @@ where
 
     let radius = size * 0.22;
     let border_style = move |_t: &iced::Theme| container::Style {
-        background: Some(theme::bg(theme::CHIP_BG)),
-        text_color: Some(theme::INK),
+        background: Some(theme::bg(theme::CHIP_BG())),
+        text_color: Some(theme::INK()),
         border: Border {
             color: Color::from_rgba(0.24, 0.35, 0.48, 0.25),
             width: 1.0,
@@ -321,7 +321,7 @@ where
     .center_y(Length::Fixed(size))
     .style(move |_t: &iced::Theme| container::Style {
         background: Some(theme::bg(bgc)),
-        text_color: Some(theme::INK),
+        text_color: Some(theme::INK()),
         border: Border {
             color: Color::from_rgba(1.0, 1.0, 1.0, 0.15),
             width: 1.0,

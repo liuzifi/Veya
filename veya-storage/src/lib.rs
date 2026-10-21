@@ -632,6 +632,48 @@ impl Store {
         )
     }
 
+    /// Keep at most `max` non-pinned records (by ascending sequence, i.e. oldest first).
+    /// Pinned records are always exempt. Returns rows removed.
+    pub fn trim_to_max_count(&mut self, max: usize) -> rusqlite::Result<usize> {
+        if max == 0 {
+            // Delete all non-pinned records.
+            return self.conn.execute(
+                "DELETE FROM clipboard_record WHERE pinned = 0",
+                [],
+            );
+        }
+        // Collect the sequences of non-pinned records beyond the `max` quota
+        // (oldest first), then delete them. Using LIMIT in a subquery is
+        // universally supported across SQLite versions.
+        let to_delete: Vec<i64> = {
+            let mut stmt = self.conn.prepare(
+                "SELECT sequence FROM clipboard_record
+                  WHERE pinned = 0
+                  ORDER BY sequence ASC
+                  LIMIT -1 OFFSET ?1",
+            )?;
+            let rows = stmt.query_map(params![max as i64], |row| row.get::<_, i64>(0))?;
+            let mut v = Vec::new();
+            for r in rows {
+                v.push(r?);
+            }
+            v
+        };
+        if to_delete.is_empty() {
+            return Ok(0);
+        }
+        let mut removed = 0;
+        let tx = self.conn.transaction()?;
+        for seq in &to_delete {
+            removed += tx.execute(
+                "DELETE FROM clipboard_record WHERE sequence = ?1 AND pinned = 0",
+                params![seq],
+            )?;
+        }
+        tx.commit()?;
+        Ok(removed)
+    }
+
     pub fn upsert_application(
         &mut self,
         exe: &str,

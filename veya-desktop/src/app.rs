@@ -14,7 +14,8 @@ use std::collections::HashMap;
 use std::sync::OnceLock;
 
 use crate::capture::{
-    CardPayloadView, CardView, HistoryFilter, HistoryQuery, Retention, SharedUi, UiState,
+    CardPayloadView, CardView, ExpiryConfig, HistoryFilter, HistoryQuery, MaxItemsConfig,
+    Retention, SharedUi, ThemeMode, UiState,
 };
 use crate::format::{self, ContentKind};
 use crate::icons::{self, Icon};
@@ -264,6 +265,8 @@ pub struct App {
     history_active: bool,
     list_density: ListDensity,
     exclude_input: String,
+    max_items_input: String,
+    expiry_days_input: String,
     detail_menu_open: bool,
     card_menu: Option<CardMenu>,
     cursor_position: iced::Point,
@@ -359,6 +362,11 @@ pub enum Message {
     },
     WindowClose,
     SetHotkey(Hotkey),
+    SetThemeMode(ThemeMode),
+    ToggleMaxItems,
+    SetMaxItemsCount(String),
+    ToggleExpiry,
+    SetExpiryDays(String),
     StartHotkeyRecord,
     CancelHotkeyRecord,
     RecordHotkeyKey(Key, Physical, Modifiers),
@@ -385,8 +393,15 @@ impl App {
         if let Ok(mut guard) = shared.lock() {
             guard.retention = Retention::default();
             guard.tracking = true;
+            guard.theme_mode = ThemeMode::default();
+            guard.max_items = MaxItemsConfig::default();
+            guard.expiry = ExpiryConfig::default();
         }
         let state = shared.lock().map(|g| g.clone()).unwrap_or_default();
+        crate::theme::set_palette(match state.theme_mode {
+            ThemeMode::Dark => &crate::theme::DARK,
+            ThemeMode::Light => &crate::theme::LIGHT,
+        });
         (
             Self {
                 quick: None,
@@ -412,6 +427,8 @@ impl App {
                 history_active: false,
                 list_density: ListDensity::default(),
                 exclude_input: String::new(),
+                max_items_input: state.max_items.count.to_string(),
+                expiry_days_input: state.expiry.days.to_string(),
                 detail_menu_open: false,
                 card_menu: None,
                 cursor_position: iced::Point::ORIGIN,
@@ -431,7 +448,14 @@ impl App {
     }
 
     pub fn theme(&self) -> Theme {
-        Theme::Dark
+        crate::theme::set_palette(match self.state.theme_mode {
+            ThemeMode::Dark => &crate::theme::DARK,
+            ThemeMode::Light => &crate::theme::LIGHT,
+        });
+        match self.state.theme_mode {
+            ThemeMode::Dark => Theme::Dark,
+            ThemeMode::Light => Theme::Light,
+        }
     }
 
     fn history_query(&self) -> HistoryQuery {
@@ -688,6 +712,26 @@ impl App {
                         .filter(|seq| next.cards.iter().any(|c| c.sequence == *seq))
                         .or_else(|| next.cards.first().map(|c| c.sequence));
                     next.expanded_raw = self.state.expanded_raw;
+                    // Sync text input fields from worker state when the worker
+                    // loaded persisted settings on startup or resolved a value.
+                    if self.max_items_input.is_empty()
+                        || self
+                            .max_items_input
+                            .parse::<u32>()
+                            .map(|v| v != next.max_items.count)
+                            .unwrap_or(true)
+                    {
+                        self.max_items_input = next.max_items.count.to_string();
+                    }
+                    if self.expiry_days_input.is_empty()
+                        || self
+                            .expiry_days_input
+                            .parse::<u32>()
+                            .map(|v| v != next.expiry.days)
+                            .unwrap_or(true)
+                    {
+                        self.expiry_days_input = next.expiry.days.to_string();
+                    }
                     self.state = next;
                 }
                 self.tracking_control.reconcile(&mut self.state);
@@ -808,6 +852,51 @@ impl App {
             Message::SetRetention(r) => {
                 let _ = self.worker.cmd_tx.send(WorkerCmd::SetRetention(r));
                 self.state.retention = r;
+                Task::none()
+            }
+            Message::SetThemeMode(mode) => {
+                self.state.theme_mode = mode;
+                let _ = self.worker.cmd_tx.send(WorkerCmd::SetThemeMode(mode));
+                Task::none()
+            }
+            Message::ToggleMaxItems => {
+                let cfg = MaxItemsConfig {
+                    enabled: !self.state.max_items.enabled,
+                    count: self.state.max_items.count,
+                };
+                self.state.max_items = cfg;
+                let _ = self.worker.cmd_tx.send(WorkerCmd::SetMaxItems(cfg));
+                Task::none()
+            }
+            Message::SetMaxItemsCount(s) => {
+                self.max_items_input = s.clone();
+                let count = s.parse::<u32>().unwrap_or(0).max(1).min(100_000);
+                let cfg = MaxItemsConfig {
+                    enabled: self.state.max_items.enabled,
+                    count,
+                };
+                self.state.max_items = cfg;
+                let _ = self.worker.cmd_tx.send(WorkerCmd::SetMaxItems(cfg));
+                Task::none()
+            }
+            Message::ToggleExpiry => {
+                let cfg = ExpiryConfig {
+                    enabled: !self.state.expiry.enabled,
+                    days: self.state.expiry.days,
+                };
+                self.state.expiry = cfg;
+                let _ = self.worker.cmd_tx.send(WorkerCmd::SetExpiry(cfg));
+                Task::none()
+            }
+            Message::SetExpiryDays(s) => {
+                self.expiry_days_input = s.clone();
+                let days = s.parse::<u32>().unwrap_or(0).max(1).min(3650);
+                let cfg = ExpiryConfig {
+                    enabled: self.state.expiry.enabled,
+                    days,
+                };
+                self.state.expiry = cfg;
+                let _ = self.worker.cmd_tx.send(WorkerCmd::SetExpiry(cfg));
                 Task::none()
             }
             Message::ToggleTracking => {
@@ -1277,9 +1366,9 @@ impl App {
             column![
                 text("Veya")
                     .size(19)
-                    .color(theme::INK)
+                    .color(theme::INK())
                     .font(crate::font::name_font()),
-                meta("你的剪贴板，有记忆。").size(11).color(theme::MUTED),
+                meta("你的剪贴板，有记忆。").size(11).color(theme::MUTED()),
             ]
             .spacing(1),
         ]
@@ -1291,18 +1380,18 @@ impl App {
                 icons::icon(
                     Icon::History,
                     if self.page == Page::History {
-                        theme::INK
+                        theme::INK()
                     } else {
-                        theme::MUTED
+                        theme::MUTED()
                     },
                     18.0
                 ),
                 body("历史记录")
                     .size(14)
                     .color(if self.page == Page::History {
-                        theme::INK
+                        theme::INK()
                     } else {
-                        theme::MUTED
+                        theme::MUTED()
                     })
             ]
             .spacing(10)
@@ -1318,16 +1407,16 @@ impl App {
                 icons::icon(
                     Icon::Settings,
                     if self.page == Page::Settings {
-                        theme::INK
+                        theme::INK()
                     } else {
-                        theme::MUTED
+                        theme::MUTED()
                     },
                     18.0
                 ),
                 body("设置").size(14).color(if self.page == Page::Settings {
-                    theme::INK
+                    theme::INK()
                 } else {
-                    theme::MUTED
+                    theme::MUTED()
                 })
             ]
             .spacing(10)
@@ -1339,9 +1428,9 @@ impl App {
         .width(Length::Fill);
 
         let dot_color = if self.state.tracking {
-            theme::OK
+            theme::OK()
         } else {
-            theme::WARN
+            theme::WARN()
         };
         let status_text = if self.state.tracking {
             "正在追踪"
@@ -1362,7 +1451,7 @@ impl App {
                         },
                         ..Default::default()
                     }),
-                meta(status_text).size(12).color(theme::MUTED),
+                meta(status_text).size(12).color(theme::MUTED()),
             ]
             .spacing(8)
             .align_y(Alignment::Center),
@@ -1372,14 +1461,14 @@ impl App {
                 self.state.retention.label()
             ))
             .size(11)
-            .color(theme::FAINT),
+            .color(theme::FAINT()),
         ]
         .spacing(5);
         if !self.state.status_note.is_empty() {
             footer = footer.push(
                 meta(self.state.status_note.clone())
                     .size(11)
-                    .color(theme::WARN),
+                    .color(theme::WARN()),
             );
         }
 
@@ -1418,7 +1507,7 @@ impl App {
 
                 container(
                     row![
-                        icons::icon(Icon::Search, theme::MUTED, 16.0),
+                        icons::icon(Icon::Search, theme::MUTED(), 16.0),
                         search_input,
                         theme::keycap("Ctrl"),
                         theme::keycap("K"),
@@ -1433,14 +1522,14 @@ impl App {
             }
             Page::Settings => container(
                 row![
-                    icons::icon(Icon::Settings, theme::ACCENT, 18.0),
+                    icons::icon(Icon::Settings, theme::ACCENT(), 18.0),
                     text("系统设置")
                         .size(15)
-                        .color(theme::INK)
+                        .color(theme::INK())
                         .font(crate::font::name_font()),
                     meta("· 隐私控制与本地存储管理")
                         .size(12)
-                        .color(theme::FAINT),
+                        .color(theme::FAINT()),
                 ]
                 .spacing(8)
                 .align_y(Alignment::Center),
@@ -1462,7 +1551,7 @@ impl App {
         };
         let pause = button(
             row![
-                icons::icon(pause_icon, theme::INK, 14.0),
+                icons::icon(pause_icon, theme::INK(), 14.0),
                 body(pause_label).size(13)
             ]
             .spacing(7)
@@ -1474,15 +1563,15 @@ impl App {
         .width(Length::Fixed(98.0));
 
         let win = row![
-            button(icons::icon(Icon::Minimize, theme::MUTED, 12.0))
+            button(icons::icon(Icon::Minimize, theme::MUTED(), 12.0))
                 .on_press(Message::WindowMinimize)
                 .style(theme::win_button)
                 .padding(pad(6.0, 8.0, 6.0, 8.0)),
-            button(icons::icon(Icon::Maximize, theme::MUTED, 12.0))
+            button(icons::icon(Icon::Maximize, theme::MUTED(), 12.0))
                 .on_press(Message::WindowToggleMaximize)
                 .style(theme::win_button)
                 .padding(pad(6.0, 8.0, 6.0, 8.0)),
-            button(icons::icon(Icon::Close, theme::MUTED, 12.0))
+            button(icons::icon(Icon::Close, theme::MUTED(), 12.0))
                 .on_press(Message::WindowClose)
                 .style(theme::win_button)
                 .padding(pad(6.0, 8.0, 6.0, 8.0)),
@@ -1575,7 +1664,7 @@ where
     let mut info = column![row![
         icons::app_avatar::<Message>(app, 18.0),
         body(short_app(app)).size(13).font(crate::font::name_font()),
-        container(text(method).size(10).color(theme::MUTED))
+        container(text(method).size(10).color(theme::MUTED()))
             .padding(pad(1.0, 5.0, 1.0, 5.0))
             .style(theme::chip_container),
     ]
@@ -1591,11 +1680,11 @@ where
         } else {
             win.to_string()
         };
-        info = info.push(meta(tag).size(11).color(theme::FAINT));
+        info = info.push(meta(tag).size(11).color(theme::FAINT()));
     }
 
     row![
-        text(time).size(11).color(theme::FAINT),
+        text(time).size(11).color(theme::FAINT()),
         Space::with_width(6.0),
         spine,
         Space::with_width(6.0),

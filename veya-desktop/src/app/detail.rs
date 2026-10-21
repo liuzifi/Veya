@@ -4,7 +4,7 @@ use iced::widget::column;
 impl App {
     pub(super) fn detail_panel(&self) -> Element<'_, Message> {
         if self.history_query_pending() {
-            return container(meta("正在加载当前记录…").color(theme::MUTED))
+            return container(meta("正在加载当前记录…").color(theme::MUTED()))
                 .width(Length::Fill)
                 .height(Length::Fill)
                 .center_x(Length::Fill)
@@ -14,7 +14,7 @@ impl App {
         let Some(seq) = self.state.selected else {
             return container(
                 column![
-                    icons::icon(Icon::Copy, theme::FAINT, 28.0),
+                    icons::icon(Icon::Copy, theme::FAINT(), 28.0),
                     Space::with_height(10.0),
                     body("选择一条记录查看详情")
                         .size(14)
@@ -22,7 +22,7 @@ impl App {
                     Space::with_height(4.0),
                     meta("复制来源、使用时间线会出现在这里。")
                         .size(11)
-                        .color(theme::FAINT),
+                        .color(theme::FAINT()),
                 ]
                 .align_x(Alignment::Center),
             )
@@ -39,9 +39,9 @@ impl App {
         };
 
         let (copy_label, copy_icon, copy_color) = if self.copied_tick > 0 {
-            ("已复制", Icon::Check, theme::OK)
+            ("已复制", Icon::Check, theme::OK())
         } else {
-            ("复制", Icon::Copy, theme::INK)
+            ("复制", Icon::Copy, theme::INK())
         };
 
         // Semantic header summary (avoids 100% duplicating full content & word wrapping breaks)
@@ -53,10 +53,10 @@ impl App {
             column![
                 text(header_title)
                     .size(16)
-                    .color(theme::INK)
+                    .color(theme::INK())
                     .font(crate::font::name_font())
                     .shaping(text::Shaping::Advanced),
-                meta(header_sub).size(12).color(theme::MUTED),
+                meta(header_sub).size(12).color(theme::MUTED()),
             ]
             .spacing(3)
             .width(Length::Fill),
@@ -71,7 +71,7 @@ impl App {
             .on_press(Message::Copy(card.sequence))
             .style(theme::primary_button)
             .padding(pad(8.0, 16.0, 8.0, 16.0)),
-            button(icons::icon(Icon::More, theme::MUTED, 16.0))
+            button(icons::icon(Icon::More, theme::MUTED(), 16.0))
                 .on_press(Message::ToggleDetailMenu)
                 .style(theme::action_button)
                 .padding(pad(8.0, 10.0, 8.0, 10.0)),
@@ -97,8 +97,8 @@ impl App {
             actions = actions.push(
                 button(
                     row![
-                        icons::icon(Icon::External, theme::MUTED, 14.0),
-                        meta("打开链接").size(12).color(theme::MUTED)
+                        icons::icon(Icon::External, theme::MUTED(), 14.0),
+                        meta("打开链接").size(12).color(theme::MUTED())
                     ]
                     .spacing(5)
                     .align_y(Alignment::Center),
@@ -113,8 +113,8 @@ impl App {
             actions = actions.push(
                 button(
                     row![
-                        icons::icon(Icon::Search, theme::MUTED, 14.0),
-                        meta("搜索").size(12).color(theme::MUTED)
+                        icons::icon(Icon::Search, theme::MUTED(), 14.0),
+                        meta("搜索").size(12).color(theme::MUTED())
                     ]
                     .spacing(5)
                     .align_y(Alignment::Center),
@@ -127,7 +127,7 @@ impl App {
 
         if matches!(card.payload, CardPayloadView::Image { .. }) {
             actions = actions.push(
-                button(meta("查看图片").size(12).color(theme::MUTED))
+                button(meta("查看图片").size(12).color(theme::MUTED()))
                     .on_press(Message::OpenContentModal(card.sequence))
                     .style(theme::action_button)
                     .padding(pad(6.0, 10.0, 6.0, 10.0)),
@@ -137,8 +137,8 @@ impl App {
         actions = actions.push(
             button(
                 row![
-                    icons::icon(Icon::Copy, theme::MUTED, 14.0),
-                    meta("复制为纯文本").size(12).color(theme::MUTED)
+                    icons::icon(Icon::Copy, theme::MUTED(), 14.0),
+                    meta("复制为纯文本").size(12).color(theme::MUTED())
                 ]
                 .spacing(5)
                 .align_y(Alignment::Center),
@@ -152,8 +152,8 @@ impl App {
             actions = actions.push(
                 button(
                     row![
-                        icons::icon(Icon::QrCode, theme::MUTED, 14.0),
-                        meta("二维码").size(12).color(theme::MUTED)
+                        icons::icon(Icon::QrCode, theme::MUTED(), 14.0),
+                        meta("二维码").size(12).color(theme::MUTED())
                     ]
                     .spacing(5)
                     .align_y(Alignment::Center),
@@ -166,7 +166,7 @@ impl App {
 
         if has_more {
             actions = actions.push(Space::with_width(Length::Fill)).push(
-                button(meta("展开全文 ↗").size(12).color(theme::ACCENT_BORDER))
+                button(meta("展开全文 ↗").size(12).color(theme::ACCENT_BORDER()))
                     .on_press(Message::OpenContentModal(card.sequence))
                     .style(theme::toolbar_filter_button(false))
                     .padding(pad(6.0, 8.0, 6.0, 8.0)),
@@ -175,10 +175,10 @@ impl App {
 
         let preview_content: Element<'_, Message> = match &card.payload {
             crate::capture::CardPayloadView::Text => column![
-                meta("内容预览").size(11).color(theme::FAINT),
+                meta("内容预览").size(11).color(theme::FAINT()),
                 text(preview)
                     .size(13)
-                    .color(theme::INK)
+                    .color(theme::INK())
                     .font(crate::font::ui_font())
                     .shaping(text::Shaping::Advanced)
                     .wrapping(text::Wrapping::None),
@@ -188,15 +188,15 @@ impl App {
             crate::capture::CardPayloadView::Files(paths) => {
                 let mut file_rows = column![meta(format!("本地文件与文件夹 · {} 项", paths.len()))
                     .size(11)
-                    .color(theme::FAINT),]
+                    .color(theme::FAINT()),]
                 .spacing(6);
                 for path in paths {
                     file_rows = file_rows.push(
                         row![
-                            icons::icon(Icon::File, theme::ACCENT, 13.0),
+                            icons::icon(Icon::File, theme::ACCENT(), 13.0),
                             text(path.clone())
                                 .size(11)
-                                .color(theme::INK)
+                                .color(theme::INK())
                                 .font(crate::font::ui_font())
                                 .shaping(text::Shaping::Advanced)
                                 .width(Length::Fill),
@@ -233,13 +233,13 @@ impl App {
                 )
                 .on_press(Message::OpenContentModal(card.sequence)),
                 column![
-                    meta("图片预览").size(11).color(theme::FAINT),
+                    meta("图片预览").size(11).color(theme::FAINT()),
                     body(format!("{width} × {height} px"))
                         .size(13)
                         .font(crate::font::name_font()),
                     meta(format::byte_size_label(*encoded_bytes))
                         .size(11)
-                        .color(theme::MUTED),
+                        .color(theme::MUTED()),
                 ]
                 .spacing(5)
                 .width(Length::Fill),
@@ -263,14 +263,14 @@ impl App {
             content_inner = content_inner.push(theme::hdivider()).push(
                 container(
                     row![
-                        icons::icon(Icon::QrCode, theme::INK, 56.0),
+                        icons::icon(Icon::QrCode, theme::INK(), 56.0),
                         column![
                             body("手机扫码跨端读取")
                                 .size(13)
                                 .font(crate::font::name_font()),
                             meta("微信扫一扫、系统相机或手机浏览器直接使用")
                                 .size(11)
-                                .color(theme::MUTED),
+                                .color(theme::MUTED()),
                         ]
                         .spacing(3),
                     ]
@@ -299,8 +299,8 @@ impl App {
                 icons::app_avatar::<Message>(&card.source_app, 38.0),
                 column![
                     body(source_title).size(14).font(crate::font::name_font()),
-                    meta(short_path).size(11).color(theme::FAINT),
-                    meta(card.time_full.clone()).size(11).color(theme::FAINT),
+                    meta(short_path).size(11).color(theme::FAINT()),
+                    meta(card.time_full.clone()).size(11).color(theme::FAINT()),
                 ]
                 .spacing(2)
                 .width(Length::Fill),
@@ -320,10 +320,10 @@ impl App {
             source_col = source_col.push(Space::with_height(12.0)).push(
                 container(
                     row![
-                        icons::icon(icon_kind, theme::ACCENT, 18.0),
+                        icons::icon(icon_kind, theme::ACCENT(), 18.0),
                         column![
                             body(ctx_title).size(12).font(crate::font::name_font()),
-                            meta(ctx_sub).size(11).color(theme::FAINT),
+                            meta(ctx_sub).size(11).color(theme::FAINT()),
                         ]
                         .spacing(1)
                         .width(Length::Fill),
@@ -339,7 +339,7 @@ impl App {
 
         if !hint.is_empty() {
             source_col = source_col.push(Space::with_height(6.0));
-            source_col = source_col.push(meta(hint).size(11).color(theme::WARN));
+            source_col = source_col.push(meta(hint).size(11).color(theme::WARN()));
         }
 
         // Usage timeline (Fig 1: 「使用记录」 with vertical connecting line and filtered '-' chars)
@@ -363,9 +363,9 @@ impl App {
                     last,
                 ));
             }
-            usage = usage.push(meta(card.paste_detail).size(10).color(theme::FAINT));
+            usage = usage.push(meta(card.paste_detail).size(10).color(theme::FAINT()));
         } else {
-            usage = usage.push(meta("暂无粘贴记录").size(12).color(theme::FAINT));
+            usage = usage.push(meta("暂无粘贴记录").size(12).color(theme::FAINT()));
         }
 
         // Content type section at the bottom of the right card
@@ -381,7 +381,7 @@ impl App {
                     body(card.kind.label())
                         .size(13)
                         .font(crate::font::name_font()),
-                    meta(card.kind.hint()).size(11).color(theme::FAINT),
+                    meta(card.kind.hint()).size(11).color(theme::FAINT()),
                 ]
                 .spacing(1),
             ]
@@ -416,7 +416,7 @@ impl App {
             Space::with_width(Length::Fill),
             meta(format!("序列号 #{}", card.sequence))
                 .size(11)
-                .color(theme::FAINT),
+                .color(theme::FAINT()),
         ];
 
         let exe = base_exe(&card.source_app).to_string();
@@ -426,9 +426,9 @@ impl App {
                     icons::icon(
                         Icon::Pin,
                         if card.pinned {
-                            theme::ACCENT
+                            theme::ACCENT()
                         } else {
-                            theme::MUTED
+                            theme::MUTED()
                         },
                         12.0
                     ),
@@ -450,7 +450,7 @@ impl App {
             .padding(theme::pad_narrow()),
             button(
                 row![
-                    icons::icon(Icon::Terminal, theme::MUTED, 12.0),
+                    icons::icon(Icon::Terminal, theme::MUTED(), 12.0),
                     meta(if self.state.expanded_raw {
                         "收起原始"
                     } else {
@@ -466,7 +466,7 @@ impl App {
             .padding(theme::pad_narrow()),
             button(
                 row![
-                    icons::icon(Icon::Close, theme::MUTED, 12.0),
+                    icons::icon(Icon::Close, theme::MUTED(), 12.0),
                     meta("排除应用").size(11)
                 ]
                 .spacing(6)
@@ -477,8 +477,8 @@ impl App {
             .padding(theme::pad_narrow()),
             button(
                 row![
-                    icons::icon(Icon::Trash, theme::DANGER, 12.0),
-                    text("删除").size(11).color(theme::DANGER),
+                    icons::icon(Icon::Trash, theme::DANGER(), 12.0),
+                    text("删除").size(11).color(theme::DANGER()),
                 ]
                 .spacing(5)
                 .align_y(Alignment::Center),
@@ -492,7 +492,7 @@ impl App {
             more = more.push(
                 button(
                     row![
-                        icons::icon(Icon::External, theme::MUTED, 12.0),
+                        icons::icon(Icon::External, theme::MUTED(), 12.0),
                         meta("打开来源").size(11)
                     ]
                     .spacing(6)
@@ -531,7 +531,7 @@ impl App {
                 container(
                     column![
                         section_label("原始剪贴板事件"),
-                        meta(sequences).size(11).color(theme::FAINT),
+                        meta(sequences).size(11).color(theme::FAINT()),
                     ]
                     .spacing(5),
                 )
@@ -577,11 +577,11 @@ impl App {
                 .font(crate::font::name_font()),
                 meta(format!("{} · 记录 #{}", card.kind.label(), card.sequence))
                     .size(11)
-                    .color(theme::FAINT),
+                    .color(theme::FAINT()),
             ]
             .spacing(3)
             .width(Length::Fill),
-            button(icons::icon(Icon::Close, theme::MUTED, 16.0))
+            button(icons::icon(Icon::Close, theme::MUTED(), 16.0))
                 .on_press(Message::CloseContentModal)
                 .style(theme::action_button)
                 .padding(8),
@@ -590,14 +590,14 @@ impl App {
 
         let footer = row![
             Space::with_width(Length::Fill),
-            button(meta("关闭").size(12).color(theme::MUTED))
+            button(meta("关闭").size(12).color(theme::MUTED()))
                 .on_press(Message::CloseContentModal)
                 .style(theme::action_button)
                 .padding(pad(8.0, 13.0, 8.0, 13.0)),
             button(
                 row![
-                    icons::icon(Icon::Copy, theme::INK, 14.0),
-                    text(copy_label).size(12).color(theme::INK),
+                    icons::icon(Icon::Copy, theme::INK(), 14.0),
+                    text(copy_label).size(12).color(theme::INK()),
                 ]
                 .spacing(6)
                 .align_y(Alignment::Center),
@@ -627,7 +627,7 @@ impl App {
                 }))
                 .size(13)
                 .line_height(iced::widget::text::LineHeight::Absolute(20.0.into()))
-                .color(theme::INK)
+                .color(theme::INK())
                 .font(content_font)
                 .shaping(text::Shaping::Advanced)
                 .width(if is_code {
@@ -675,8 +675,8 @@ impl App {
                 } else {
                     container(
                         column![
-                            icons::icon(Icon::Image, theme::FAINT, 28.0),
-                            meta("正在加载完整图片…").size(12).color(theme::MUTED),
+                            icons::icon(Icon::Image, theme::FAINT(), 28.0),
+                            meta("正在加载完整图片…").size(12).color(theme::MUTED()),
                         ]
                         .spacing(9)
                         .align_x(Alignment::Center),
@@ -773,7 +773,7 @@ fn thumbnail_or_placeholder<'a>(
                 "缩略图加载中…"
             })
             .size(11)
-            .color(theme::MUTED),
+            .color(theme::MUTED()),
         )
         .width(Length::Fixed(width))
         .height(Length::Fixed(height))
