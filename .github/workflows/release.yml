@@ -31,6 +31,11 @@ jobs:
           if ($env:RELEASE_TAG -cnotmatch '^v[0-9]+\.[0-9]+\.[0-9]+$') { throw "Invalid release tag: $env:RELEASE_TAG" }
           git fetch origin "+refs/tags/$($env:RELEASE_TAG):refs/tags/$($env:RELEASE_TAG)" --force
           if ($LASTEXITCODE -ne 0) { throw "Cannot fetch annotated tag: $env:RELEASE_TAG" }
+      - name: Install Rust toolchain
+        shell: pwsh
+        run: |
+          rustup toolchain install 1.99.0-x86_64-pc-windows-msvc --profile minimal --component rustfmt
+          rustup default 1.99.0-x86_64-pc-windows-msvc
       - name: Validate release tag
         shell: pwsh
         env:
@@ -40,11 +45,6 @@ jobs:
         # CI-success gate is relaxed here. Tag format, version match and the
         # annotated-tag/commit checks still run.
         run: ./scripts/validate-release.ps1 -Tag $env:RELEASE_TAG -SkipRemoteChecks
-      - name: Install Rust toolchain
-        shell: pwsh
-        run: |
-          rustup toolchain install 1.99.0-x86_64-pc-windows-msvc --profile minimal --component rustfmt
-          rustup default 1.99.0-x86_64-pc-windows-msvc
       - name: Verify workspace
         shell: pwsh
         run: |
