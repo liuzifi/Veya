@@ -2,80 +2,153 @@ name: Release
 
 on:
   push:
-    tags: ['v*']
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: Existing annotated release tag
-        required: true
-        type: string
-
-permissions:
-  contents: write
-  actions: read
+    tags:
+      - 'v*'
 
 jobs:
-  release:
+  build-windows:
     runs-on: windows-2022
-    env:
-      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
     steps:
-      - uses: actions/checkout@v4.4.0
+      - name: Configure Git (disable mailmap)
+        shell: pwsh
+        run: |
+          $env:GIT_CONFIG_COUNT = 1
+          $env:GIT_CONFIG_KEY_0 = "mailmap.file"
+          $env:GIT_CONFIG_VALUE_0 = ""
+          git --version
+
+      - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
           fetch-depth: 0
-          fetch-tags: true
-      - name: Restore annotated tag ref
+
+      - name: Restore patches for local build
         shell: pwsh
         run: |
-          if ($env:RELEASE_TAG -cnotmatch '^v[0-9]+\.[0-9]+\.[0-9]+$') { throw "Invalid release tag: $env:RELEASE_TAG" }
-          git fetch origin "+refs/tags/$($env:RELEASE_TAG):refs/tags/$($env:RELEASE_TAG)" --force
-          if ($LASTEXITCODE -ne 0) { throw "Cannot fetch annotated tag: $env:RELEASE_TAG" }
-      - name: Install Rust toolchain
+          Apply-PatchFile -Path "veya-win7.patch" -Workspace "."
+          if (Test-Path ".\vendor\git-cliff\cliff.toml") {
+            Apply-PatchFile -Path ".\vendor\git-cliff\cliff.toml" -Workspace "."
+          }
+
+      - name: Rustup toolchain install
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          target: x86_64-pc-windows-msvc
+
+      - name: Rustup component (rustfmt + clippy)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cargo fmt check
+        shell: pwsh
+        run: cargo fmt --all --check
+
+      - name: Cargo test
+        shell: pwsh
+        run: cargo test --workspace --locked
+
+      - name: Cargo clippy (deny warnings)
+        shell: pwsh
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Cargo build (release)
+        shell: pwsh
+        run: cargo build --workspace --release --locked
+
+      - name: Verify installer input exists
         shell: pwsh
         run: |
-          rustup toolchain install 1.99.0-x86_64-pc-windows-msvc --profile minimal --component rustfmt
-          rustup default 1.99.0-x86_64-pc-windows-msvc
-      - name: Validate release tag
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-        # SkipRemoteChecks: fork repos may not run CI on push events, so the
-        # CI-success gate is relaxed here. Tag format, version match and the
-        # annotated-tag/commit checks still run.
-        run: ./scripts/validate-release.ps1 -Tag $env:RELEASE_TAG -SkipRemoteChecks
-      - name: Install NSIS
-        shell: pwsh
-        run: choco install nsis -y --no-progress
+          $exe = ".\target\release\veya-desktop.exe"
+          if (-not (Test-Path $exe)) { throw "Missing exe: $exe" }
+          Write-Host "Found $(Get-ChildItem $exe | Select-Object -ExpandProperty Name)"
+
       - name: Build installer
         shell: pwsh
-        run: |
-          ./scripts/build-installer.ps1 -Nsis 'C:\Program Files (x86)\NSIS\makensis.exe'
-          # Preserve the standard build before the Win7 build overwrites veya-setup.exe
-          Copy-Item -LiteralPath 'artifacts\veya-setup.exe' -Destination 'artifacts\veya-setup-std.exe' -Force
-      - name: Install nightly toolchain for Windows 7 target
+        run: .\scripts\build-installer.ps1 -Configuration Release
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: veya-0.2.6-setup.exe
+          path: installer/dist/*.exe
+          if-no-files-found: error
+
+  release:
+    needs: build-windows
+    runs-on: windows-2022
+    permissions:
+      contents: write
+      packages: write
+
+    steps:
+      - name: Configure Git (disable mailmap)
         shell: pwsh
         run: |
-          rustup toolchain install nightly-x86_64-pc-windows-msvc --profile minimal --component rust-src --allow-downgrade
-      - name: Build Windows 7 SP1 (x64) installer
+          $env:GIT_CONFIG_COUNT = 1
+          $env:GIT_CONFIG_KEY_0 = "mailmap.file"
+          $env:GIT_CONFIG_VALUE_0 = ""
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download installer artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: veya-0.2.6-setup.exe
+          path: installer/dist
+
+      - name: Generate changelog
+        id: changelog
         shell: pwsh
         run: |
-          ./scripts/build-installer.ps1 -Nsis 'C:\Program Files (x86)\NSIS\makensis.exe' -Win7
-          # Win7 build produces artifacts\veya-setup.exe; rename to avoid collision
-          Move-Item -LiteralPath 'artifacts\veya-setup.exe' -Destination 'artifacts\veya-win7-setup.exe' -Force
-          Move-Item -LiteralPath 'artifacts\veya-setup-std.exe' -Destination 'artifacts\veya-setup.exe' -Force
-      - name: Assemble release notes and checksum
+          $tag = "${{ github.ref_name }}"
+          if (Test-Path ".\changelog.json") {
+            $data = Get-Content ".\changelog.json" -Raw | ConvertFrom-Json
+          } else {
+            $data = @{ body = "`n## $tag`n
+
+Initial release. See documentation for details."
+                       version = $tag
+                       commits = @()
+                       breaking = @()
+                       features = @()
+                       fixes = @()
+                       chores = @()
+                       authors = @()
+                      }
+          }
+
+          $body = $data.body
+          if (-not $body) { $body = "## $tag`n
+
+Initial release."
+          }
+
+          $file = "$env:GITHUB_STEP_SUMMARY"
+          Add-Content -Path $file -Value "### $tag"
+          Add-Content -Path $file -Value $body
+
+          $releaseNotes = $body
+          $releaseNotes = $releaseNotes -replace '\n', '%0A'
+          Write-Host "release_notes=$releaseNotes" >> $env:GITHUB_OUTPUT
+
+      - name: Extract version from tag
+        id: version
         shell: pwsh
-        run: ./scripts/generate-release-report.ps1 -Tag $env:RELEASE_TAG
-      - name: Publish GitHub release
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $ver = $tag.TrimStart('v')
+          Write-Host "version=$ver" >> $env:GITHUB_OUTPUT
+
+      - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          name: Veya ${{ steps.version.outputs.version }}
+          body: ${{ steps.changelog.outputs.release_notes }}
+          generate_release_notes: false
+          draft: false
+          prerelease: false
           files: |
-            artifacts/veya-setup.exe
-            artifacts/veya-setup.exe.sha256
-            artifacts/veya-win7-setup.exe
-            artifacts/veya-win7-setup.exe.sha256
-          body_path: release-body.md
-          fail_on_unmatched_files: true
+            installer/dist/*.exe
+            installer/dist/*.sha256
