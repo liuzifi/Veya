@@ -19,7 +19,7 @@ if ($Win7) {
     $env:RUSTFLAGS = (($previousRustflags, '-C target-feature=+crt-static') | Where-Object { $_ }) -join ' '
     try {
         & cargo +nightly build --locked --release -p veya-desktop --target $win7Target `
-            -Z build-std=std,panic_abort --target-dir $buildDir --manifest-path (Join-Path $root 'Cargo.toml')
+            '-Zbuild-std=std,panic_abort' --target-dir $buildDir --manifest-path (Join-Path $root 'Cargo.toml')
         if ($LASTEXITCODE -ne 0) { throw "cargo build (win7) failed: $LASTEXITCODE" }
     }
     finally {
