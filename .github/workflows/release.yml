@@ -54,8 +54,7 @@ jobs:
       - name: Install nightly toolchain for Windows 7 target
         shell: pwsh
         run: |
-          rustup toolchain install nightly-x86_64-pc-windows-msvc --profile minimal --component rust-src
-          rustup target add x86_64-win7-windows-msvc --toolchain nightly
+          rustup toolchain install nightly-x86_64-pc-windows-msvc --profile minimal --component rust-src --allow-downgrade
       - name: Build Windows 7 SP1 (x64) installer
         shell: pwsh
         run: ./scripts/build-installer.ps1 -Nsis 'C:\Program Files (x86)\NSIS\makensis.exe' -Win7
