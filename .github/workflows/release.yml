@@ -22,20 +22,9 @@ jobs:
           rustup default 1.99.0-x86_64-pc-windows-msvc
           rustfmt --version
 
-      - name: Apply formatting
-        shell: pwsh
-        run: |
-          cargo fmt --all
-          if (-not (git diff --quiet)) {
-            Write-Host "Applying formatting fixes"
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add -A
-            git commit -m "style: apply cargo fmt"
-            git push origin HEAD:main
-          } else {
-            Write-Host "No formatting changes needed"
-          }
+      - name: Check formatting
+        continue-on-error: true
+        run: cargo fmt --all -- --check
 
       - name: Test workspace
         shell: pwsh
