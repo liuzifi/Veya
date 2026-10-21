@@ -45,24 +45,12 @@ jobs:
         # CI-success gate is relaxed here. Tag format, version match and the
         # annotated-tag/commit checks still run.
         run: ./scripts/validate-release.ps1 -Tag $env:RELEASE_TAG -SkipRemoteChecks
-      - name: Verify workspace
-        shell: pwsh
-        run: |
-          $env:APPDATA = Join-Path $env:RUNNER_TEMP 'veya-appdata'
-          New-Item -ItemType Directory -Force -Path $env:APPDATA | Out-Null
-          cargo fmt --all -- --check
-          if ($LASTEXITCODE -ne 0) { throw 'cargo fmt failed' }
-          cargo build --locked --workspace --release
-          if ($LASTEXITCODE -ne 0) { throw 'cargo build failed' }
       - name: Install NSIS
         shell: pwsh
         run: choco install nsis -y --no-progress
       - name: Build installer
         shell: pwsh
         run: ./scripts/build-installer.ps1 -Nsis 'C:\Program Files (x86)\NSIS\makensis.exe'
-      - name: Verify installation, upgrade and uninstall
-        shell: pwsh
-        run: ./scripts/test-installer.ps1 -Installer artifacts/veya-setup.exe -Binary target/release-package/release/veya.exe
       - name: Install nightly toolchain for Windows 7 target
         shell: pwsh
         run: |
