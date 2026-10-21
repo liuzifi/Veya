@@ -380,8 +380,8 @@ pub enum Message {
     SetFilter(Filter),
     TogglePinnedOnly,
     SetSortOrder(SortOrder),
-    PreviousHistoryPage,
-    NextHistoryPage,
+    QuickScrolled(scrollable::Viewport),
+    HistoryScrolled(scrollable::Viewport),
     ToggleListDensity,
     WindowDrag,
     WindowReady(iced::window::Id),
@@ -542,6 +542,21 @@ impl App {
         }
         self.ensure_visible_selection();
         scrollable::snap_to(self.active_scroll_id(), scrollable::RelativeOffset::START)
+    }
+
+    /// Infinite scroll: request the next page without resetting scroll position
+    /// or clearing the accumulated cards. The worker detects that only `page`
+    /// changed and appends instead of replacing.
+    fn request_history_load_more(&mut self) {
+        if !self.state.history_has_next
+            || self.state.history_loading
+            || self.history_query_pending()
+        {
+            return;
+        }
+        self.history_page = self.history_page.saturating_add(1);
+        let query = self.history_query();
+        let _ = self.worker.cmd_tx.send(WorkerCmd::QueryHistory(query));
     }
 
     fn unload_full_image(&mut self) {
@@ -1168,23 +1183,17 @@ impl App {
                 self.unload_full_image();
                 self.request_history_query(true)
             }
-            Message::PreviousHistoryPage => {
-                if !self.history_query_pending() && self.history_page > 0 {
-                    self.history_page -= 1;
-                    self.unload_full_image();
-                    self.request_history_query(false)
-                } else {
-                    Task::none()
+            Message::QuickScrolled(viewport) => {
+                if viewport.relative_offset().y > 0.85 {
+                    self.request_history_load_more();
                 }
+                Task::none()
             }
-            Message::NextHistoryPage => {
-                if !self.history_query_pending() && self.state.history_has_next {
-                    self.history_page = self.history_page.saturating_add(1);
-                    self.unload_full_image();
-                    self.request_history_query(false)
-                } else {
-                    Task::none()
+            Message::HistoryScrolled(viewport) => {
+                if viewport.relative_offset().y > 0.85 {
+                    self.request_history_load_more();
                 }
+                Task::none()
             }
             Message::ToggleListDensity => {
                 self.list_density = match self.list_density {

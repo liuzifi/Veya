@@ -506,23 +506,14 @@ impl App {
                 .id(quick_scroll_id())
                 .height(Length::Fill)
                 .style(theme::scroll_style)
+                .on_scroll(|viewport: scrollable::Viewport| {
+                    Message::QuickScrolled(viewport)
+                })
                 .into()
         };
         let footer = row![
             meta("↑ ↓ 选择 · Enter 粘贴 · Esc 返回").size(11),
             Space::with_width(Length::Fill),
-            button(meta("上一页").size(11))
-                .style(theme::action_button)
-                .on_press_maybe(
-                    (!busy && !pending && self.history_page > 0)
-                        .then_some(Message::PreviousHistoryPage)
-                ),
-            button(meta("下一页").size(11))
-                .style(theme::action_button)
-                .on_press_maybe(
-                    (!busy && !pending && self.state.history_has_next)
-                        .then_some(Message::NextHistoryPage)
-                ),
         ]
         .spacing(4)
         .align_y(Alignment::Center);

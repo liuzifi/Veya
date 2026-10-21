@@ -216,6 +216,10 @@ struct HistoryPage {
     error: Option<String>,
     invalidated: bool,
     loading: bool,
+    /// True when the in-flight request appends the next page to `cards`
+    /// instead of replacing them. Set by `refresh` when only `page` changed,
+    /// consumed by `apply`.
+    appending: bool,
     detail_content: Option<(u32, Arc<str>)>,
     detail_error: Option<(u32, String)>,
 }
@@ -240,15 +244,36 @@ impl HistoryPage {
             self.has_next = false;
             self.error = None;
             self.loading = false;
+            self.appending = false;
             self.detail_content = None;
             self.detail_error = None;
             return;
         }
-        if self.invalidated || self.query.as_ref() != Some(query) {
+        // Infinite scroll: when only `page` changed (next page, same filters),
+        // keep accumulated cards and append the incoming page instead of resetting.
+        let is_append = !self.invalidated
+            && self.query.as_ref().is_some_and(|prev| {
+                prev.search == query.search
+                    && prev.filter == query.filter
+                    && prev.pinned_only == query.pinned_only
+                    && prev.newest_first == query.newest_first
+                    && prev.group_id == query.group_id
+                    && prev.page.wrapping_add(1) == query.page
+            });
+        if is_append {
+            self.loading = true;
+            self.appending = true;
+            self.error = None;
+            if let Some(loader) = &self.loader {
+                self.generation = loader.request(query);
+            }
+            self.query = Some(query.clone());
+        } else if self.invalidated || self.query.as_ref() != Some(query) {
             self.cards = Arc::default();
             self.has_next = false;
             self.error = None;
             self.loading = true;
+            self.appending = false;
             if let Some(loader) = &self.loader {
                 self.generation = loader.request(query);
             }
@@ -287,7 +312,17 @@ impl HistoryPage {
                 cards,
                 has_next,
             } if generation == self.generation => {
-                self.cards = cards.into();
+                if self.appending {
+                    // Accumulate: extend the existing cards with the new page.
+                    let mut combined =
+                        Vec::with_capacity(self.cards.len() + cards.len());
+                    combined.extend(self.cards.iter().cloned());
+                    combined.extend(cards);
+                    self.cards = combined.into();
+                    self.appending = false;
+                } else {
+                    self.cards = cards.into();
+                }
                 self.has_next = has_next;
                 self.loading = false;
                 self.error = None;

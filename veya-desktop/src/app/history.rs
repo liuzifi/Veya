@@ -180,10 +180,13 @@ impl App {
                 ))
                 .style(theme::scroll_style)
                 .height(Length::Fill)
+                .on_scroll(|viewport: scrollable::Viewport| {
+                    Message::HistoryScrolled(viewport)
+                })
                 .into()
         };
 
-        column![content, self.history_pagination()]
+        column![content]
             .spacing(0)
             .width(Length::Fill)
             .height(Length::Fill)
@@ -199,59 +202,6 @@ impl App {
         } else {
             self.state.cards.iter().collect()
         }
-    }
-
-    fn history_pagination(&self) -> Element<'_, Message> {
-        let page = self.history_page;
-        let pending = self.history_query_pending();
-        if self.state.cards.is_empty() && page == 0 && !self.state.history_has_next && !pending {
-            return Space::with_height(0.0).into();
-        }
-
-        let previous_color = if page > 0 && !pending {
-            theme::MUTED()
-        } else {
-            theme::FAINT()
-        };
-        let next_color = if self.state.history_has_next && !pending {
-            theme::MUTED()
-        } else {
-            theme::FAINT()
-        };
-
-        let mut previous = button(text("上一页").size(12).color(previous_color))
-            .padding(pad(5.0, 10.0, 5.0, 10.0))
-            .style(theme::action_button);
-        if page > 0 && !pending {
-            previous = previous.on_press(Message::PreviousHistoryPage);
-        }
-
-        let mut next = button(text("下一页").size(12).color(next_color))
-            .padding(pad(5.0, 10.0, 5.0, 10.0))
-            .style(theme::action_button);
-        if self.state.history_has_next && !pending {
-            next = next.on_press(Message::NextHistoryPage);
-        }
-
-        container(
-            row![
-                previous,
-                meta(if pending {
-                    "正在加载…".to_string()
-                } else {
-                    format!("第 {} 页 · 每页 25 条", page + 1)
-                })
-                .size(11)
-                .color(theme::FAINT()),
-                next,
-            ]
-            .spacing(8)
-            .align_y(Alignment::Center),
-        )
-        .width(Length::Fill)
-        .center_x(Length::Fill)
-        .padding(pad(6.0, 4.0, 2.0, 4.0))
-        .into()
     }
 
     pub(super) fn ensure_visible_selection(&mut self) {
