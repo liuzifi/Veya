@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 use veya_core::{
     ClipboardPayload, HistoryPayload, HistorySummary, PasteConfidence, SourceConfidence,
 };
+pub use veya_storage::GroupSummary;
 use veya_windows::hotkey::Hotkey;
 
 use crate::format::{self, ContentKind};
@@ -61,6 +62,9 @@ pub struct HistoryQuery {
     pub pinned_only: bool,
     pub newest_first: bool,
     pub page: usize,
+    /// When `Some`, the query is scoped to the members of that card group
+    /// (ordered by most-recently-added first).
+    pub group_id: Option<i64>,
 }
 
 impl Default for HistoryQuery {
@@ -71,6 +75,7 @@ impl Default for HistoryQuery {
             pinned_only: false,
             newest_first: true,
             page: 0,
+            group_id: None,
         }
     }
 }
@@ -242,6 +247,8 @@ pub struct UiState {
     pub theme_mode: ThemeMode,
     pub max_items: MaxItemsConfig,
     pub expiry: ExpiryConfig,
+    /// Card groups for the quick-panel tab bar.
+    pub groups: Vec<GroupSummary>,
 }
 
 pub type SharedUi = Arc<Mutex<UiState>>;

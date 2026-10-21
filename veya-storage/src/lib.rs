@@ -10,6 +10,14 @@ use veya_core::{
     PasteTriggerRecord, SourceConfidence,
 };
 
+/// Lightweight projection used by the UI to render the group tab bar.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupSummary {
+    pub id: i64,
+    pub name: String,
+    pub member_count: usize,
+}
+
 /// Persisted list image, bounded to the UI thumbnail edge.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Thumbnail {
@@ -105,6 +113,24 @@ impl Store {
             );
             "#,
         )?;
+
+        tx.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS card_group (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                position INTEGER NOT NULL DEFAULT 0,
+                created_at_ms INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS card_group_member (
+                group_id INTEGER NOT NULL REFERENCES card_group(id) ON DELETE CASCADE,
+                sequence INTEGER NOT NULL REFERENCES clipboard_record(sequence) ON DELETE CASCADE,
+                added_at_ms INTEGER NOT NULL,
+                PRIMARY KEY (group_id, sequence)
+            );
+            "#,
+        )?;
+
         if !has_column(&tx, "paste_trigger", "confidence")? {
             tx.execute_batch(
                 "ALTER TABLE paste_trigger ADD COLUMN confidence TEXT NOT NULL DEFAULT 'hotkey-observed'",
@@ -625,30 +651,41 @@ impl Store {
     }
 
     /// Delete records older than `cutoff_ms`. Returns rows removed.
+    ///
+    /// Pinned records and card-group members are always exempt from automatic
+    /// cleanup so that saved favourites survive retention/expiry/trim policies.
     pub fn purge_older_than(&mut self, cutoff_ms: i64) -> rusqlite::Result<usize> {
         self.conn.execute(
-            "DELETE FROM clipboard_record WHERE created_at_ms < ?1 AND pinned = 0",
+            "DELETE FROM clipboard_record
+              WHERE created_at_ms < ?1
+                AND pinned = 0
+                AND sequence NOT IN (SELECT sequence FROM card_group_member)",
             params![cutoff_ms],
         )
     }
 
-    /// Keep at most `max` non-pinned records (by ascending sequence, i.e. oldest first).
-    /// Pinned records are always exempt. Returns rows removed.
+    /// Keep at most `max` non-pinned, non-grouped records (by ascending
+    /// sequence, i.e. oldest first).  Pinned records and card-group members
+    /// are always exempt and do **not** count toward the `max` quota.
+    /// Returns rows removed.
     pub fn trim_to_max_count(&mut self, max: usize) -> rusqlite::Result<usize> {
         if max == 0 {
-            // Delete all non-pinned records.
+            // Delete all non-pinned, non-grouped records.
             return self.conn.execute(
-                "DELETE FROM clipboard_record WHERE pinned = 0",
+                "DELETE FROM clipboard_record
+                  WHERE pinned = 0
+                    AND sequence NOT IN (SELECT sequence FROM card_group_member)",
                 [],
             );
         }
-        // Collect the sequences of non-pinned records beyond the `max` quota
-        // (oldest first), then delete them. Using LIMIT in a subquery is
-        // universally supported across SQLite versions.
+        // Collect the sequences of non-pinned, non-grouped records beyond the
+        // `max` quota (oldest first), then delete them.  Using LIMIT in a
+        // subquery is universally supported across SQLite versions.
         let to_delete: Vec<i64> = {
             let mut stmt = self.conn.prepare(
                 "SELECT sequence FROM clipboard_record
                   WHERE pinned = 0
+                    AND sequence NOT IN (SELECT sequence FROM card_group_member)
                   ORDER BY sequence ASC
                   LIMIT -1 OFFSET ?1",
             )?;
@@ -672,6 +709,101 @@ impl Store {
         }
         tx.commit()?;
         Ok(removed)
+    }
+
+    /// Return all groups ordered by their manual `position` then `id`.
+    pub fn list_groups(&self) -> rusqlite::Result<Vec<GroupSummary>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT g.id, g.name, COUNT(m.sequence)
+               FROM card_group g
+          LEFT JOIN card_group_member m ON m.group_id = g.id
+              GROUP BY g.id
+              ORDER BY g.position ASC, g.id ASC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(GroupSummary {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                member_count: row.get::<_, i64>(2)? as usize,
+            })
+        })?;
+        let mut v = Vec::new();
+        for r in rows {
+            v.push(r?);
+        }
+        Ok(v)
+    }
+
+    /// Create a new group.  Returns the newly-assigned id.
+    /// Errors on duplicate name (SQLite UNIQUE constraint).
+    pub fn create_group(&mut self, name: &str, now_ms: i64) -> rusqlite::Result<i64> {
+        let pos: i64 = self
+            .conn
+            .query_row("SELECT COALESCE(MAX(position), -1) + 1 FROM card_group", [], |r| r.get(0))
+            .unwrap_or(0);
+        self.conn.execute(
+            "INSERT INTO card_group (name, position, created_at_ms) VALUES (?1, ?2, ?3)",
+            params![name, pos, now_ms],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Rename an existing group.  Errors on duplicate name.
+    pub fn rename_group(&mut self, id: i64, new_name: &str) -> rusqlite::Result<usize> {
+        self.conn.execute(
+            "UPDATE card_group SET name = ?1 WHERE id = ?2",
+            params![new_name, id],
+        )
+    }
+
+    /// Delete a group.  Member records themselves are preserved — only the
+    /// grouping association is removed (ON DELETE CASCADE on card_group_member).
+    pub fn delete_group(&mut self, id: i64) -> rusqlite::Result<usize> {
+        self.conn.execute("DELETE FROM card_group WHERE id = ?1", params![id])
+    }
+
+    /// Add a clipboard record to a group.  Idempotent: re-adding an existing
+    /// member is a no-op (INSERT OR IGNORE).
+    pub fn add_group_member(
+        &mut self,
+        group_id: i64,
+        sequence: u32,
+        now_ms: i64,
+    ) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO card_group_member (group_id, sequence, added_at_ms)
+             VALUES (?1, ?2, ?3)",
+            params![group_id, sequence as i64, now_ms],
+        )?;
+        Ok(())
+    }
+
+    /// Remove a clipboard record from a group.
+    pub fn remove_group_member(
+        &mut self,
+        group_id: i64,
+        sequence: u32,
+    ) -> rusqlite::Result<usize> {
+        self.conn.execute(
+            "DELETE FROM card_group_member WHERE group_id = ?1 AND sequence = ?2",
+            params![group_id, sequence as i64],
+        )
+    }
+
+    /// Return the sequences of all members of `group_id`, ordered by most
+    /// recently added first (so newly-added favourites appear on top).
+    pub fn group_members(&self, group_id: i64) -> rusqlite::Result<Vec<i64>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT sequence FROM card_group_member
+              WHERE group_id = ?1
+              ORDER BY added_at_ms DESC",
+        )?;
+        let rows = stmt.query_map(params![group_id], |row| row.get::<_, i64>(0))?;
+        let mut v = Vec::new();
+        for r in rows {
+            v.push(r?);
+        }
+        Ok(v)
     }
 
     pub fn upsert_application(

@@ -373,12 +373,27 @@ pub(super) fn load_page(
     query: &HistoryQuery,
     current: &impl Fn() -> bool,
 ) -> Result<Option<(Vec<CardView>, bool)>, String> {
+    let group_members: Option<std::collections::HashSet<i64>> = match query.group_id {
+        Some(id) => Some(
+            store
+                .group_members(id)
+                .map_err(|e| format!("读取分组失败：{e}"))?
+                .into_iter()
+                .collect(),
+        ),
+        None => None,
+    };
     let mut cursor = None;
     let mut aggregator = HistoryAggregator::new(query.newest_first);
     let mut cards = Vec::with_capacity(HISTORY_PAGE_SIZE);
     let mut matched = 0usize;
     let skip = query.page.saturating_mul(HISTORY_PAGE_SIZE);
     let mut consume = |summary: HistorySummary| {
+        if let Some(members) = &group_members {
+            if !members.contains(&i64::from(summary.representative.sequence)) {
+                return false;
+            }
+        }
         if matches(&summary, query) {
             if matched >= skip.saturating_add(HISTORY_PAGE_SIZE) {
                 return true;

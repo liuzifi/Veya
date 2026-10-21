@@ -447,7 +447,7 @@ impl App {
     }
 }
 
-fn card_menu_origin(cursor: iced::Point, window: iced::Size) -> iced::Point {
+pub(super) fn card_menu_origin(cursor: iced::Point, window: iced::Size) -> iced::Point {
     const MENU_WIDTH: f32 = 170.0;
     const MENU_HEIGHT: f32 = 82.0;
     let max_x = (window.width - MENU_WIDTH - 8.0).max(0.0);

@@ -13,8 +13,8 @@ use veya_windows::platform::{enrich_clipboard, enrich_paste, PlatformEvent, Wind
 use veya_windows::{write_payload, ClipboardWriteError};
 
 use crate::capture::{
-    CardPayloadView, CardView, ExpiryConfig, HistoryQuery, MaxItemsConfig, Retention, SharedUi,
-    ThemeMode, UiState,
+    CardPayloadView, CardView, ExpiryConfig, GroupSummary, HistoryQuery, MaxItemsConfig, Retention,
+    SharedUi, ThemeMode, UiState,
 };
 use crate::format::now_ms;
 
@@ -36,6 +36,11 @@ pub enum WorkerCmd {
     SetThemeMode(ThemeMode),
     SetMaxItems(MaxItemsConfig),
     SetExpiry(ExpiryConfig),
+    CreateGroup { name: String },
+    RenameGroup { id: i64, name: String },
+    DeleteGroup { id: i64 },
+    AddToGroup { group_id: i64, sequence: u32 },
+    RemoveFromGroup { group_id: i64, sequence: u32 },
     ExcludeApp { exe: String },
     UnexcludeApp { exe: String },
     DeleteRecord { sequences: Vec<u32> },
@@ -361,6 +366,7 @@ fn publish(
     theme_mode: ThemeMode,
     max_items: MaxItemsConfig,
     expiry: ExpiryConfig,
+    groups: Vec<GroupSummary>,
 ) {
     history_page.refresh(store, history_query, history_active);
     let status_note = history_page.error.clone().unwrap_or(status_note);
@@ -392,6 +398,7 @@ fn publish(
         theme_mode,
         max_items,
         expiry,
+        groups,
     };
     if let Ok(mut guard) = shared.lock() {
         snap.revision = guard.revision.wrapping_add(1);
@@ -569,6 +576,7 @@ fn run_worker(
             theme_mode,
             max_items,
             expiry,
+            groups: store.list_groups().unwrap_or_default(),
         );
 
         let pump = std::thread::Builder::new()
@@ -806,6 +814,73 @@ fn run_worker(
                             }
                         }
                     }
+                    WorkerCmd::CreateGroup { name } => {
+                        let name = name.trim();
+                        if name.is_empty() {
+                            status_note = "分组名称不能为空".into();
+                        } else {
+                            status_note = match store.create_group(name, now_ms()) {
+                                Ok(_) => format!("已创建分组「{name}」"),
+                                Err(error) => {
+                                    if error.to_string().contains("UNIQUE") {
+                                        "分组名称已存在".into()
+                                    } else {
+                                        format!("创建分组失败：{error}")
+                                    }
+                                }
+                            };
+                        }
+                    }
+                    WorkerCmd::RenameGroup { id, name } => {
+                        let name = name.trim();
+                        if name.is_empty() {
+                            status_note = "分组名称不能为空".into();
+                        } else {
+                            status_note = match store.rename_group(id, name) {
+                                Ok(0) => "分组不存在".into(),
+                                Ok(_) => format!("分组已重命名为「{name}」"),
+                                Err(error) => {
+                                    if error.to_string().contains("UNIQUE") {
+                                        "分组名称已存在".into()
+                                    } else {
+                                        format!("重命名分组失败：{error}")
+                                    }
+                                }
+                            };
+                        }
+                    }
+                    WorkerCmd::DeleteGroup { id } => {
+                        status_note = match store.delete_group(id) {
+                            Ok(0) => "分组不存在".into(),
+                            Ok(_) => {
+                                history_page.invalidate();
+                                "分组已删除，其中的记录已保留".into()
+                            }
+                            Err(error) => format!("删除分组失败：{error}"),
+                        };
+                    }
+                    WorkerCmd::AddToGroup { group_id, sequence } => {
+                        status_note = match store.add_group_member(group_id, sequence, now_ms()) {
+                            Ok(_) => {
+                                if history_query.group_id == Some(group_id) {
+                                    history_page.invalidate();
+                                }
+                                "已加入分组".into()
+                            }
+                            Err(error) => format!("加入分组失败：{error}"),
+                        };
+                    }
+                    WorkerCmd::RemoveFromGroup { group_id, sequence } => {
+                        status_note = match store.remove_group_member(group_id, sequence) {
+                            Ok(_) => {
+                                if history_query.group_id == Some(group_id) {
+                                    history_page.invalidate();
+                                }
+                                "已从分组移除".into()
+                            }
+                            Err(error) => format!("从分组移除失败：{error}"),
+                        };
+                    }
                 }
             }
 
@@ -863,6 +938,7 @@ fn run_worker(
                     theme_mode,
                     max_items,
                     expiry,
+                    groups: store.list_groups().unwrap_or_default(),
                 );
             }
 
@@ -978,6 +1054,7 @@ fn run_worker(
                     theme_mode,
                     max_items,
                     expiry,
+                    groups: store.list_groups().unwrap_or_default(),
                 );
             }
         }

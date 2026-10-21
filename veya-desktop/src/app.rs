@@ -14,8 +14,8 @@ use std::collections::HashMap;
 use std::sync::OnceLock;
 
 use crate::capture::{
-    CardPayloadView, CardView, ExpiryConfig, HistoryFilter, HistoryQuery, MaxItemsConfig,
-    Retention, SharedUi, ThemeMode, UiState,
+    CardPayloadView, CardView, ExpiryConfig, GroupSummary, HistoryFilter, HistoryQuery,
+    MaxItemsConfig, Retention, SharedUi, ThemeMode, UiState,
 };
 use crate::format::{self, ContentKind};
 use crate::icons::{self, Icon};
@@ -269,6 +269,8 @@ pub struct App {
     expiry_days_input: String,
     detail_menu_open: bool,
     card_menu: Option<CardMenu>,
+    quick_group_sel: Option<i64>,
+    quick_group_input: Option<QuickGroupInput>,
     cursor_position: iced::Point,
     window_size: iced::Size,
     content_modal_for: Option<u32>,
@@ -282,10 +284,40 @@ pub struct App {
     updates: UpdateCheck,
 }
 
+/// Inline text input state for creating or renaming a quick-paste group tab.
+#[derive(Debug, Clone)]
+struct QuickGroupInput {
+    mode: QuickGroupInputMode,
+    value: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QuickGroupInputMode {
+    Create,
+    Rename { id: i64 },
+}
+
 #[derive(Debug, Clone)]
 pub enum Message {
     QuickMove(i32),
     QuickPaste(u32),
+    QuickSelectGroup(Option<i64>),
+    QuickStartCreateGroup,
+    QuickStartRenameGroup(i64),
+    QuickGroupInputChanged(String),
+    QuickGroupInputSubmit,
+    QuickGroupInputCancel,
+    QuickDeleteGroup(i64),
+    QuickOpenCardMenu(u32),
+    QuickCloseCardMenu,
+    QuickAddToGroup {
+        group_id: i64,
+        sequence: u32,
+    },
+    QuickRemoveFromGroup {
+        group_id: i64,
+        sequence: u32,
+    },
     QuickDismiss {
         restore: bool,
     },
@@ -431,6 +463,8 @@ impl App {
                 expiry_days_input: state.expiry.days.to_string(),
                 detail_menu_open: false,
                 card_menu: None,
+                quick_group_sel: None,
+                quick_group_input: None,
                 cursor_position: iced::Point::ORIGIN,
                 window_size,
                 content_modal_for: None,
@@ -459,12 +493,18 @@ impl App {
     }
 
     fn history_query(&self) -> HistoryQuery {
+        let group_id = if self.quick.is_some() {
+            self.quick_group_sel
+        } else {
+            None
+        };
         HistoryQuery {
             search: self.search.clone(),
             filter: self.filter.into(),
             pinned_only: self.pinned_only,
             newest_first: self.sort_order == SortOrder::Newest,
             page: self.history_page,
+            group_id,
         }
     }
 
@@ -596,14 +636,122 @@ impl App {
         let card_menu_was_open = self.card_menu.is_some();
         if !matches!(
             &message,
-            Message::Tick | Message::CursorMoved(_) | Message::OpenCardMenu(_)
+            Message::Tick
+            | Message::CursorMoved(_)
+            | Message::OpenCardMenu(_)
+            | Message::QuickOpenCardMenu(_)
+            | Message::QuickGroupInputChanged(_)
         ) {
             self.card_menu = None;
         }
+        // While the inline group-name input is active, intercept the keyboard
+        // shortcuts that quick_event emits so Enter submits, Escape cancels,
+        // and arrow navigation is suppressed until editing finishes.
+        let message = if self.quick_group_input.is_some() {
+            match message {
+                Message::RecopySelected => Message::QuickGroupInputSubmit,
+                Message::QuickDismiss { .. } => Message::QuickGroupInputCancel,
+                Message::QuickMove(_) => Message::QuickCloseCardMenu,
+                other => other,
+            }
+        } else {
+            message
+        };
         match message {
             Message::QuickMove(delta) => self.quick_move(delta),
             Message::QuickPaste(sequence) => self.quick_paste(sequence),
             Message::QuickDismiss { restore } => self.dismiss_quick(restore),
+            Message::QuickSelectGroup(group_id) => {
+                self.quick_group_sel = group_id;
+                self.request_history_query(true)
+            }
+            Message::QuickStartCreateGroup => {
+                self.quick_group_input = Some(QuickGroupInput {
+                    mode: QuickGroupInputMode::Create,
+                    value: String::new(),
+                });
+                Task::none()
+            }
+            Message::QuickStartRenameGroup(id) => {
+                let value = self
+                    .state
+                    .groups
+                    .iter()
+                    .find(|g| g.id == id)
+                    .map(|g| g.name.clone())
+                    .unwrap_or_default();
+                self.quick_group_input = Some(QuickGroupInput {
+                    mode: QuickGroupInputMode::Rename { id },
+                    value,
+                });
+                Task::none()
+            }
+            Message::QuickGroupInputChanged(value) => {
+                if let Some(input) = self.quick_group_input.as_mut() {
+                    input.value = value;
+                }
+                Task::none()
+            }
+            Message::QuickGroupInputSubmit => {
+                if let Some(input) = self.quick_group_input.take() {
+                    let name = input.value.trim().to_owned();
+                    if name.is_empty() {
+                        self.state.status_note = "分组名称不能为空".into();
+                    } else {
+                        match input.mode {
+                            QuickGroupInputMode::Create => {
+                                let _ = self
+                                    .worker
+                                    .cmd_tx
+                                    .send(WorkerCmd::CreateGroup { name });
+                            }
+                            QuickGroupInputMode::Rename { id } => {
+                                let _ = self
+                                    .worker
+                                    .cmd_tx
+                                    .send(WorkerCmd::RenameGroup { id, name });
+                            }
+                        }
+                    }
+                }
+                Task::none()
+            }
+            Message::QuickGroupInputCancel => {
+                self.quick_group_input = None;
+                Task::none()
+            }
+            Message::QuickDeleteGroup(id) => {
+                let _ = self.worker.cmd_tx.send(WorkerCmd::DeleteGroup { id });
+                if self.quick_group_sel == Some(id) {
+                    self.quick_group_sel = None;
+                    return self.request_history_query(true);
+                }
+                Task::none()
+            }
+            Message::QuickOpenCardMenu(sequence) => {
+                self.card_menu = Some(CardMenu {
+                    sequence,
+                    position: self.cursor_position,
+                });
+                Task::none()
+            }
+            Message::QuickCloseCardMenu => Task::none(),
+            Message::QuickAddToGroup { group_id, sequence } => {
+                let _ = self
+                    .worker
+                    .cmd_tx
+                    .send(WorkerCmd::AddToGroup { group_id, sequence });
+                self.card_menu = None;
+                Task::none()
+            }
+            Message::QuickRemoveFromGroup { group_id, sequence } => {
+                let _ = self
+                    .worker
+                    .cmd_tx
+                    .send(WorkerCmd::RemoveFromGroup { group_id, sequence });
+                self.card_menu = None;
+                Task::none()
+            }
             Message::QuickFinished { request_id, result } => {
                 self.finish_quick_paste(request_id, result)
             }

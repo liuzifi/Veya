@@ -404,16 +404,41 @@ impl App {
         ]
         .align_y(Alignment::Center)
         .spacing(6);
-        let search = text_input("搜索剪贴板历史…", &self.search)
-            .id(search_input_id())
-            .size(14)
-            .padding(10)
-            .style(theme::input_style);
-        let search = if busy {
-            search
+        let search: Element<'_, Message> = if let Some(input) = &self.quick_group_input {
+            let field = text_input("输入分组名称…", &input.value)
+                .id(group_input_id())
+                .size(14)
+                .padding(10)
+                .style(theme::input_style)
+                .on_input(Message::QuickGroupInputChanged)
+                .on_submit(Message::QuickGroupInputSubmit);
+            // In rename mode append a danger button to delete the group; create
+            // mode has nothing to delete yet so only the input field is shown.
+            if let QuickGroupInputMode::Rename { id } = input.mode {
+                let delete = button(icons::icon(Icon::Trash, theme::DANGER(), 14.0))
+                    .padding(8)
+                    .style(theme::danger_button)
+                    .on_press(Message::QuickDeleteGroup(id));
+                row![field, delete]
+                    .spacing(6)
+                    .align_y(Alignment::Center)
+                    .into()
+            } else {
+                field.into()
+            }
         } else {
-            search.on_input(Message::SearchChanged)
+            let field = text_input("搜索剪贴板历史…", &self.search)
+                .id(search_input_id())
+                .size(14)
+                .padding(10)
+                .style(theme::input_style);
+            if busy {
+                field.into()
+            } else {
+                field.on_input(Message::SearchChanged).into()
+            }
         };
+        let group_tabs = self.quick_group_tabs();
         let list: Element<'_, Message> = if pending || self.state.cards.is_empty() {
             container(
                 column![
@@ -469,9 +494,11 @@ impl App {
                         self.state.selected == Some(card.sequence),
                     ));
                 let row = if busy {
-                    row
+                    mouse_area(row).into()
                 } else {
-                    row.on_press(Message::QuickPaste(card.sequence))
+                    mouse_area(row.on_press(Message::QuickPaste(card.sequence)))
+                        .on_right_press(Message::QuickOpenCardMenu(card.sequence))
+                        .into()
                 };
                 rows = rows.push(row);
             }
@@ -499,24 +526,149 @@ impl App {
         ]
         .spacing(4)
         .align_y(Alignment::Center);
-        let mut layout =
-            column![header, search, theme::hdivider(), list, theme::hdivider()].spacing(9);
+        let mut layout = column![header, search, group_tabs, theme::hdivider(), list, theme::hdivider()]
+            .spacing(9);
         if let Some(error) = &quick.error {
             layout = layout.push(meta(error.clone()).size(12).color(theme::WARN()));
         } else if busy {
             layout = layout.push(meta("正在粘贴，请松开按键…").size(12));
         }
-        container(layout.push(footer))
+        let base = container(layout.push(footer))
             .padding(14)
             .width(Length::Fill)
             .height(Length::Fill)
-            .style(theme::shell_style)
+            .style(theme::shell_style);
+        let overlay: Element<'_, Message> = self
+            .card_menu
+            .and_then(|menu| {
+                self.state
+                    .cards
+                    .iter()
+                    .find(|card| card.sequence == menu.sequence)
+                    .map(|card| self.quick_card_menu(card, menu.position))
+            })
+            .unwrap_or_else(|| Space::new(Length::Fill, Length::Fill).into());
+        stack([base.into(), overlay]).into()
+    }
+
+    /// Horizontal group-tab row: "全部" + one chip per group + a "+ 新建" button.
+    /// Right-clicking a group tab offers rename / delete.
+    fn quick_group_tabs(&self) -> Element<'_, Message> {
+        let mut tabs: Vec<Element<'_, Message>> = Vec::new();
+        let all_selected = self.quick_group_sel.is_none();
+        let all_tab = button(meta("全部").size(12))
+            .padding(pad(4.0, 10.0, 4.0, 10.0))
+            .style(theme::chip_button(all_selected))
+            .on_press(Message::QuickSelectGroup(None));
+        tabs.push(all_tab.into());
+        for group in self.state.groups.iter() {
+            let selected = self.quick_group_sel == Some(group.id);
+            let label = button(text(group.name.as_str()).size(12))
+                .padding(pad(4.0, 10.0, 4.0, 10.0))
+                .style(theme::chip_button(selected))
+                .on_press(Message::QuickSelectGroup(Some(group.id)));
+            let label = mouse_area(label)
+                .on_right_press(Message::QuickStartRenameGroup(group.id));
+            tabs.push(label.into());
+        }
+        let add = button(
+            row![
+                icons::icon(Icon::Plus, theme::MUTED(), 12.0),
+                meta("新建").size(11),
+            ]
+            .spacing(4)
+            .align_y(Alignment::Center),
+        )
+        .padding(pad(4.0, 8.0, 4.0, 8.0))
+        .style(theme::ghost_button)
+        .on_press(Message::QuickStartCreateGroup);
+        tabs.push(add.into());
+        let mut row = row![].spacing(6).align_y(Alignment::Center);
+        for tab in tabs {
+            row = row.push(tab);
+        }
+        scrollable(row)
+            .width(Length::Fill)
+            .height(Length::Shrink)
+            .style(theme::scroll_style)
             .into()
+    }
+
+    /// Right-click context menu for a card inside the quick picker.
+    /// Lists every existing group (toggle add/remove) plus a "新建分组" entry.
+    fn quick_card_menu(
+        &self,
+        card: &CardView,
+        position: iced::Point,
+    ) -> Element<'_, Message> {
+        let mut items: Vec<Element<'_, Message>> = Vec::new();
+        for group in self.state.groups.iter() {
+            let label = format!(
+                "添加到「{}」",
+                group.name
+            );
+            let item = button(
+                row![
+                    icons::icon(Icon::Pin, theme::MUTED(), 14.0),
+                    text(label).size(12),
+                ]
+                .spacing(9)
+                .align_y(Alignment::Center),
+            )
+            .width(Length::Fill)
+            .padding(pad(8.0, 10.0, 8.0, 10.0))
+            .on_press(Message::QuickAddToGroup {
+                group_id: group.id,
+                sequence: card.sequence,
+            })
+            .style(theme::context_menu_item(false));
+            items.push(item.into());
+        }
+        let new_group = button(
+            row![
+                icons::icon(Icon::Plus, theme::MUTED(), 14.0),
+                text("新建分组…").size(12),
+            ]
+            .spacing(9)
+            .align_y(Alignment::Center),
+        )
+        .width(Length::Fill)
+        .padding(pad(8.0, 10.0, 8.0, 10.0))
+        .on_press(Message::QuickStartCreateGroup)
+        .style(theme::context_menu_item(false));
+        items.push(new_group.into());
+        let menu = mouse_area(
+            container(column(items).spacing(2))
+                .width(Length::Fixed(180.0))
+                .padding(4)
+                .style(theme::context_menu_panel),
+        )
+        .on_press(Message::QuickCloseCardMenu)
+        .on_right_press(Message::QuickCloseCardMenu);
+        let origin = card_menu_origin(position, self.window_size);
+        let positioned = container(menu)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_x(iced::alignment::Horizontal::Left)
+            .align_y(iced::alignment::Vertical::Top)
+            .padding(iced::Padding {
+                top: origin.y,
+                left: origin.x,
+                right: 0.0,
+                bottom: 0.0,
+            });
+        let dismiss =
+            mouse_area(Space::new(Length::Fill, Length::Fill)).on_press(Message::QuickCloseCardMenu);
+        stack([dismiss.into(), positioned.into()]).into()
     }
 }
 
 fn quick_scroll_id() -> scrollable::Id {
     scrollable::Id::new("quick-history")
+}
+
+fn group_input_id() -> text_input::Id {
+    text_input::Id::new("quick-group-name")
 }
 
 fn moved_index(sequences: &[u32], selected: Option<u32>, delta: i32) -> Option<usize> {
