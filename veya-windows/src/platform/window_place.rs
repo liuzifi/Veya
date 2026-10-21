@@ -19,7 +19,10 @@ type GetDpiForMonitorFn = unsafe extern "system" fn(HMONITOR, i32, *mut u32, *mu
 unsafe fn monitor_dpi(monitor: HMONITOR) -> u32 {
     if let Ok(lib) = LoadLibraryW(w!("shcore.dll")) {
         if let Some(proc_addr) = GetProcAddress(lib, s!("GetDpiForMonitor")) {
-            let get_dpi = std::mem::transmute::<unsafe extern "system" fn() -> isize, GetDpiForMonitorFn>(proc_addr);
+            let get_dpi = std::mem::transmute::<
+                unsafe extern "system" fn() -> isize,
+                GetDpiForMonitorFn,
+            >(proc_addr);
             let (mut dpi_x, mut dpi_y) = (0u32, 0u32);
             // 0 == MDT_EFFECTIVE_DPI
             if get_dpi(monitor, 0, &mut dpi_x, &mut dpi_y).is_ok() && dpi_x != 0 {

@@ -50,14 +50,21 @@ jobs:
         run: choco install nsis -y --no-progress
       - name: Build installer
         shell: pwsh
-        run: ./scripts/build-installer.ps1 -Nsis 'C:\Program Files (x86)\NSIS\makensis.exe'
+        run: |
+          ./scripts/build-installer.ps1 -Nsis 'C:\Program Files (x86)\NSIS\makensis.exe'
+          # Preserve the standard build before the Win7 build overwrites veya-setup.exe
+          Copy-Item -LiteralPath 'artifacts\veya-setup.exe' -Destination 'artifacts\veya-setup-std.exe' -Force
       - name: Install nightly toolchain for Windows 7 target
         shell: pwsh
         run: |
           rustup toolchain install nightly-x86_64-pc-windows-msvc --profile minimal --component rust-src --allow-downgrade
       - name: Build Windows 7 SP1 (x64) installer
         shell: pwsh
-        run: ./scripts/build-installer.ps1 -Nsis 'C:\Program Files (x86)\NSIS\makensis.exe' -Win7
+        run: |
+          ./scripts/build-installer.ps1 -Nsis 'C:\Program Files (x86)\NSIS\makensis.exe' -Win7
+          # Win7 build produces artifacts\veya-setup.exe; rename to avoid collision
+          Move-Item -LiteralPath 'artifacts\veya-setup.exe' -Destination 'artifacts\veya-win7-setup.exe' -Force
+          Move-Item -LiteralPath 'artifacts\veya-setup-std.exe' -Destination 'artifacts\veya-setup.exe' -Force
       - name: Assemble release notes and checksum
         shell: pwsh
         run: ./scripts/generate-release-report.ps1 -Tag $env:RELEASE_TAG

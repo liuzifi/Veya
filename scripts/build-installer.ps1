@@ -56,10 +56,4 @@ if ($LASTEXITCODE -ne 0) { throw "makensis failed: $LASTEXITCODE" }
 
 $installer = Join-Path $artifacts 'veya-setup.exe'
 if (-not (Test-Path -LiteralPath $installer)) { throw "Installer missing: $installer" }
-if ($Win7) {
-    # veya.nsi always writes veya-setup.exe; rename so it does not collide with the normal build.
-    $win7Installer = Join-Path $artifacts 'veya-win7-setup.exe'
-    Move-Item -LiteralPath $installer -Destination $win7Installer -Force
-    $installer = $win7Installer
-}
 Write-Host "Built $installer"
