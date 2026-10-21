@@ -1,11 +1,41 @@
 //! Place a logical-size window in the cursor monitor's physical work area.
 
-use windows::Win32::Foundation::POINT;
+use windows::core::{s, w};
+use windows::Win32::Foundation::{HRESULT, POINT};
 use windows::Win32::Graphics::Gdi::{
-    GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+    GetDC, GetDeviceCaps, GetMonitorInfoW, MonitorFromPoint, ReleaseDC, HMONITOR, LOGPIXELSX,
+    MONITORINFO, MONITOR_DEFAULTTONEAREST,
 };
-use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
+use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+
+type GetDpiForMonitorFn = unsafe extern "system" fn(HMONITOR, i32, *mut u32, *mut u32) -> HRESULT;
+
+/// Effective DPI of `monitor`.
+///
+/// `GetDpiForMonitor` lives in shcore.dll and only exists on Windows 8.1+, so it is resolved at
+/// runtime. A static import would stop the process from loading on Windows 7. When it is missing
+/// (or fails) fall back to the system DPI, then to 96.
+unsafe fn monitor_dpi(monitor: HMONITOR) -> u32 {
+    if let Ok(lib) = LoadLibraryW(w!("shcore.dll")) {
+        if let Some(proc_addr) = GetProcAddress(lib, s!("GetDpiForMonitor")) {
+            let get_dpi: GetDpiForMonitorFn = std::mem::transmute(proc_addr);
+            let (mut dpi_x, mut dpi_y) = (0u32, 0u32);
+            // 0 == MDT_EFFECTIVE_DPI
+            if get_dpi(monitor, 0, &mut dpi_x, &mut dpi_y).is_ok() && dpi_x != 0 {
+                return dpi_x;
+            }
+        }
+    }
+    let hdc = GetDC(None);
+    let dpi = GetDeviceCaps(Some(hdc), LOGPIXELSX);
+    ReleaseDC(None, hdc);
+    if dpi > 0 {
+        dpi as u32
+    } else {
+        96
+    }
+}
 
 #[derive(Clone, Copy, Debug)]
 pub struct StartupPlacement {
@@ -27,9 +57,7 @@ pub fn startup_placement(window_width: f32, window_height: f32) -> Option<Startu
             return None;
         }
 
-        let mut dpi_x = 96;
-        let mut dpi_y = 96;
-        let _ = GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y);
+        let dpi_x = monitor_dpi(monitor);
         let scale = if dpi_x == 0 { 1.0 } else { dpi_x as f32 / 96.0 };
         let work = info.rcWork;
         Some(fit_and_center(

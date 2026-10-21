@@ -1,13 +1,35 @@
-param([string]$Nsis = '')
+param(
+    [string]$Nsis = '',
+    # Build for Windows 7 SP1 (x86_64-win7-windows-msvc, nightly + build-std, static CRT).
+    [switch]$Win7
+)
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
 $artifacts = Join-Path $root 'artifacts'
 $buildDir = Join-Path $root 'target\release-package'
+if ($Win7) { $buildDir = Join-Path $root 'target\release-package-win7' }
 New-Item -ItemType Directory -Force -Path $artifacts | Out-Null
 
-& cargo build --locked --release -p veya-desktop --target-dir $buildDir --manifest-path (Join-Path $root 'Cargo.toml')
-if ($LASTEXITCODE -ne 0) { throw "cargo build failed: $LASTEXITCODE" }
+if ($Win7) {
+    # Tier 3 target: no prebuilt std, so build it with nightly. A static CRT avoids requiring the
+    # UCRT update / VC++ redistributable on the target machine.
+    $win7Target = 'x86_64-win7-windows-msvc'
+    $previousRustflags = $env:RUSTFLAGS
+    $env:RUSTFLAGS = (($previousRustflags, '-C target-feature=+crt-static') | Where-Object { $_ }) -join ' '
+    try {
+        & cargo +nightly build --locked --release -p veya-desktop --target $win7Target `
+            -Z build-std=std,panic_abort --target-dir $buildDir --manifest-path (Join-Path $root 'Cargo.toml')
+        if ($LASTEXITCODE -ne 0) { throw "cargo build (win7) failed: $LASTEXITCODE" }
+    }
+    finally {
+        $env:RUSTFLAGS = $previousRustflags
+    }
+}
+else {
+    & cargo build --locked --release -p veya-desktop --target-dir $buildDir --manifest-path (Join-Path $root 'Cargo.toml')
+    if ($LASTEXITCODE -ne 0) { throw "cargo build failed: $LASTEXITCODE" }
+}
 
 if (-not $Nsis) {
     $Nsis = @(
@@ -24,7 +46,7 @@ $metadata = & cargo metadata --no-deps --format-version 1 --manifest-path (Join-
 if ($LASTEXITCODE -ne 0) { throw 'cargo metadata failed' }
 $version = (($metadata | ConvertFrom-Json).packages | Where-Object name -eq 'veya-desktop').version
 if (-not $version) { throw 'veya-desktop version not found' }
-$binary = Join-Path $buildDir 'release\veya.exe'
+$binary = if ($Win7) { Join-Path $buildDir "$win7Target\release\veya.exe" } else { Join-Path $buildDir 'release\veya.exe' }
 if (-not (Test-Path -LiteralPath $binary)) { throw "Binary missing: $binary" }
 & (Join-Path $PSScriptRoot 'assert-gui-binary.ps1') -Binary $binary
 $iconHash = (Get-FileHash -LiteralPath (Join-Path $root 'icons\icon.ico') -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -34,4 +56,10 @@ if ($LASTEXITCODE -ne 0) { throw "makensis failed: $LASTEXITCODE" }
 
 $installer = Join-Path $artifacts 'veya-setup.exe'
 if (-not (Test-Path -LiteralPath $installer)) { throw "Installer missing: $installer" }
+if ($Win7) {
+    # veya.nsi always writes veya-setup.exe; rename so it does not collide with the normal build.
+    $win7Installer = Join-Path $artifacts 'veya-win7-setup.exe'
+    Move-Item -LiteralPath $installer -Destination $win7Installer -Force
+    $installer = $win7Installer
+}
 Write-Host "Built $installer"

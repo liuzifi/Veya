@@ -60,6 +60,14 @@ jobs:
       - name: Verify installation, upgrade and uninstall
         shell: pwsh
         run: ./scripts/test-installer.ps1 -Installer artifacts/veya-setup.exe -Binary target/release-package/release/veya.exe
+      - name: Install nightly toolchain for Windows 7 target
+        shell: pwsh
+        run: |
+          rustup toolchain install nightly-x86_64-pc-windows-msvc --profile minimal --component rust-src
+          rustup target add x86_64-win7-windows-msvc --toolchain nightly
+      - name: Build Windows 7 SP1 (x64) installer
+        shell: pwsh
+        run: ./scripts/build-installer.ps1 -Nsis 'C:\Program Files (x86)\NSIS\makensis.exe' -Win7
       - name: Assemble release notes and checksum
         shell: pwsh
         run: ./scripts/generate-release-report.ps1 -Tag $env:RELEASE_TAG
@@ -70,5 +78,7 @@ jobs:
           files: |
             artifacts/veya-setup.exe
             artifacts/veya-setup.exe.sha256
+            artifacts/veya-win7-setup.exe
+            artifacts/veya-win7-setup.exe.sha256
           body_path: release-body.md
           fail_on_unmatched_files: true
