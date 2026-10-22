@@ -13,8 +13,8 @@ use veya_windows::platform::{enrich_clipboard, enrich_paste, PlatformEvent, Wind
 use veya_windows::{write_payload, ClipboardWriteError};
 
 use crate::capture::{
-    CardPayloadView, CardView, ExpiryConfig, GroupSummary, HistoryQuery, MaxItemsConfig, Retention,
-    SharedUi, ThemeMode, UiState,
+    CardPayloadView, CardView, ExpiryConfig, GroupSummary, HistoryQuery, MaxItemsConfig, SharedUi,
+    ThemeMode, UiState,
 };
 use crate::format::now_ms;
 
@@ -32,7 +32,6 @@ pub enum WorkerCmd {
     UnloadContent,
     ClearHistory,
     SetTracking { on: bool, request_id: Option<u64> },
-    SetRetention(Retention),
     SetThemeMode(ThemeMode),
     SetMaxItems(MaxItemsConfig),
     SetExpiry(ExpiryConfig),
@@ -81,6 +80,14 @@ fn db_path() -> std::path::PathBuf {
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("Veya")
         .join("veya.db")
+}
+
+/// The colour theme saved in the database, read before the worker starts so the first frame
+/// already uses it. Falls back to the default theme when nothing is saved yet.
+pub fn saved_theme_mode() -> ThemeMode {
+    Store::read_setting_readonly(db_path(), "theme")
+        .map(|value| ThemeMode::from_key(&value))
+        .unwrap_or_default()
 }
 
 fn write_internal_payload(
@@ -153,7 +160,7 @@ fn prepare_record_paste(
 
 #[cfg(test)]
 fn load_history_page(store: &Store, query: &HistoryQuery) -> Result<(Vec<CardView>, bool), String> {
-    history_loader::load_page(store, query, &|| true)?.ok_or_else(|| "cancelled".into())
+    history_loader::load_page(store, query, false, &|| true)?.ok_or_else(|| "cancelled".into())
 }
 
 fn persist_paste_trigger(
@@ -202,6 +209,39 @@ fn discard_purged_record(store: &Store, flow: &mut FlowEngine) {
             flow.delete_record(sequence);
         }
     }
+}
+
+/// Apply the expiry and maximum-count settings. Pinned and grouped records are never removed.
+/// Returns how many records were deleted.
+fn enforce_limits(
+    store: &mut Store,
+    expiry: ExpiryConfig,
+    max_items: MaxItemsConfig,
+    now_ms: i64,
+) -> usize {
+    let mut removed = 0;
+    if expiry.enabled {
+        let cutoff = now_ms - i64::from(expiry.days) * 86_400_000;
+        removed += store.purge_older_than(cutoff).unwrap_or(0);
+    }
+    if max_items.enabled {
+        removed += store
+            .trim_to_max_count(max_items.count as usize)
+            .unwrap_or(0);
+    }
+    removed
+}
+
+fn limits_note(name: &str, enabled: bool, value: String, removed: usize) -> String {
+    let mut note = if enabled {
+        format!("{name}已设为 {value}")
+    } else {
+        format!("{name}已关闭")
+    };
+    if removed > 0 {
+        note.push_str(&format!("，已清理 {removed} 条记录"));
+    }
+    note
 }
 
 /// Owns only the current immutable page; status updates can share it without
@@ -275,7 +315,7 @@ impl HistoryPage {
             self.loading = true;
             self.appending = false;
             if let Some(loader) = &self.loader {
-                self.generation = loader.request(query);
+                self.generation = loader.request_through(query);
             }
             self.query = Some(query.clone());
             self.invalidated = false;
@@ -314,8 +354,7 @@ impl HistoryPage {
             } if generation == self.generation => {
                 if self.appending {
                     // Accumulate: extend the existing cards with the new page.
-                    let mut combined =
-                        Vec::with_capacity(self.cards.len() + cards.len());
+                    let mut combined = Vec::with_capacity(self.cards.len() + cards.len());
                     combined.extend(self.cards.iter().cloned());
                     combined.extend(cards);
                     self.cards = combined.into();
@@ -391,7 +430,6 @@ fn publish(
     modal_image: &Option<(u32, iced::widget::image::Handle)>,
     tracking: bool,
     tracking_ack: u64,
-    retention: Retention,
     excluded_apps: Vec<String>,
     expanded_raw: bool,
     status_note: String,
@@ -412,6 +450,7 @@ fn publish(
         history_active,
         history_has_next: history_page.has_next,
         history_loading: history_page.loading,
+        history_appending: history_page.appending,
         detail_content: history_page.detail_content.clone(),
         detail_error: history_page.detail_error.clone(),
         modal_image: if history_active {
@@ -421,7 +460,6 @@ fn publish(
         },
         selected: None,
         record_count: store.count_records().unwrap_or(flow.len()),
-        retention,
         tracking,
         tracking_ack,
         excluded_apps,
@@ -534,12 +572,6 @@ fn run_worker(
         let mut modal_image = None;
         let mut tracking = true;
         let mut tracking_ack = 0;
-        let mut retention = store
-            .get_setting("retention")
-            .ok()
-            .flatten()
-            .map(|s| Retention::from_key(&s))
-            .unwrap_or_default();
         let mut expanded_raw = false;
         let mut status_note = String::new();
         let mut excluded_apps = store.list_excluded().unwrap_or_default();
@@ -560,36 +592,23 @@ fn run_worker(
             .flatten()
             .map(|s| ThemeMode::from_key(&s))
             .unwrap_or_default();
-        let mut max_items = MaxItemsConfig {
-            enabled: store
+        let mut max_items = MaxItemsConfig::from_settings(
+            store
                 .get_setting("max_items_enabled")
                 .ok()
                 .flatten()
-                .map(|s| s == "1")
-                .unwrap_or(false),
-            count: store
-                .get_setting("max_items")
-                .ok()
-                .flatten()
-                .and_then(|s| s.parse::<u32>().ok())
-                .map(|n| n.max(1).min(100_000))
-                .unwrap_or(1000),
-        };
-        let mut expiry = ExpiryConfig {
-            enabled: store
+                .as_deref(),
+            store.get_setting("max_items").ok().flatten().as_deref(),
+        );
+        let mut expiry = ExpiryConfig::from_settings(
+            store
                 .get_setting("expiry_enabled")
                 .ok()
                 .flatten()
-                .map(|s| s == "1")
-                .unwrap_or(false),
-            days: store
-                .get_setting("expiry_days")
-                .ok()
-                .flatten()
-                .and_then(|s| s.parse::<u32>().ok())
-                .map(|n| n.max(1).min(3650))
-                .unwrap_or(90),
-        };
+                .as_deref(),
+            store.get_setting("expiry_days").ok().flatten().as_deref(),
+            store.get_setting("retention").ok().flatten().as_deref(),
+        );
 
         publish(
             &shared,
@@ -601,7 +620,6 @@ fn run_worker(
             &modal_image,
             tracking,
             tracking_ack,
-            retention,
             excluded_apps.clone(),
             expanded_raw,
             status_note.clone(),
@@ -611,7 +629,7 @@ fn run_worker(
             theme_mode,
             max_items,
             expiry,
-            groups: store.list_groups().unwrap_or_default(),
+            store.list_groups().unwrap_or_default(),
         );
 
         let pump = std::thread::Builder::new()
@@ -706,17 +724,6 @@ fn run_worker(
                         } else {
                             "已暂停记录".into()
                         };
-                    }
-                    WorkerCmd::SetRetention(r) => {
-                        retention = r;
-                        let _ = store.set_setting("retention", r.as_key());
-                        if let Some(cutoff) = retention.cutoff_ms(now_ms()) {
-                            if store.purge_older_than(cutoff).unwrap_or(0) > 0 {
-                                history_page.invalidate();
-                            }
-                            discard_purged_record(&store, &mut flow);
-                        }
-                        status_note = format!("保留期已设为 {}", r.label());
                     }
                     WorkerCmd::ExcludeApp { exe } => {
                         status_note = match exclude_app(&mut store, &mut excluded_apps, &exe) {
@@ -826,28 +833,39 @@ fn run_worker(
                     }
                     WorkerCmd::SetMaxItems(config) => {
                         max_items = config;
-                        let _ =
-                            store.set_setting("max_items_enabled", if config.enabled { "1" } else { "0" });
+                        let _ = store.set_setting(
+                            "max_items_enabled",
+                            if config.enabled { "1" } else { "0" },
+                        );
                         let _ = store.set_setting("max_items", &config.count.to_string());
-                        if config.enabled {
-                            if store.trim_to_max_count(config.count as usize).unwrap_or(0) > 0 {
-                                history_page.invalidate();
-                                discard_purged_record(&store, &mut flow);
-                            }
+                        let removed = enforce_limits(&mut store, expiry, max_items, now_ms());
+                        if removed > 0 {
+                            history_page.invalidate();
+                            discard_purged_record(&store, &mut flow);
                         }
+                        status_note = limits_note(
+                            "最大保存条数",
+                            config.enabled,
+                            format!("{} 条", config.count),
+                            removed,
+                        );
                     }
                     WorkerCmd::SetExpiry(config) => {
                         expiry = config;
-                        let _ =
-                            store.set_setting("expiry_enabled", if config.enabled { "1" } else { "0" });
+                        let _ = store
+                            .set_setting("expiry_enabled", if config.enabled { "1" } else { "0" });
                         let _ = store.set_setting("expiry_days", &config.days.to_string());
-                        if config.enabled {
-                            let cutoff = now_ms() - config.days as i64 * 86_400_000;
-                            if store.purge_older_than(cutoff).unwrap_or(0) > 0 {
-                                history_page.invalidate();
-                                discard_purged_record(&store, &mut flow);
-                            }
+                        let removed = enforce_limits(&mut store, expiry, max_items, now_ms());
+                        if removed > 0 {
+                            history_page.invalidate();
+                            discard_purged_record(&store, &mut flow);
                         }
+                        status_note = limits_note(
+                            "记录过期时间",
+                            config.enabled,
+                            format!("{} 天", config.days),
+                            removed,
+                        );
                     }
                     WorkerCmd::CreateGroup { name } => {
                         let name = name.trim();
@@ -921,31 +939,11 @@ fn run_worker(
 
             dirty |= history_page.receive();
 
-            // Periodic retention purge (default 30 days; honors settings).
+            // Periodic purge: expiry days and maximum item count (when enabled).
             let now = now_ms();
             if now - last_purge_ms > 60_000 {
                 last_purge_ms = now;
-                let mut purged = false;
-                // Built-in retention policy (Day1/Day7/Day30/Never).
-                if let Some(cutoff) = retention.cutoff_ms(now) {
-                    if store.purge_older_than(cutoff).unwrap_or(0) > 0 {
-                        purged = true;
-                    }
-                }
-                // Custom expiry days (when enabled, overrides retention cutoff semantics).
-                if expiry.enabled {
-                    let cutoff = now - expiry.days as i64 * 86_400_000;
-                    if store.purge_older_than(cutoff).unwrap_or(0) > 0 {
-                        purged = true;
-                    }
-                }
-                // Max items count trim.
-                if max_items.enabled {
-                    if store.trim_to_max_count(max_items.count as usize).unwrap_or(0) > 0 {
-                        purged = true;
-                    }
-                }
-                if purged {
+                if enforce_limits(&mut store, expiry, max_items, now) > 0 {
                     history_page.invalidate();
                     discard_purged_record(&store, &mut flow);
                     dirty = true;
@@ -963,7 +961,6 @@ fn run_worker(
                     &modal_image,
                     tracking,
                     tracking_ack,
-                    retention,
                     excluded_apps.clone(),
                     expanded_raw,
                     status_note.clone(),
@@ -973,7 +970,7 @@ fn run_worker(
                     theme_mode,
                     max_items,
                     expiry,
-                    groups: store.list_groups().unwrap_or_default(),
+                    store.list_groups().unwrap_or_default(),
                 );
             }
 
@@ -1033,6 +1030,8 @@ fn run_worker(
                                                     status_note = format!("记录保存失败：{error}");
                                                 } else {
                                                     history_page.invalidate();
+                                                    // Enforce the maximum-count limit right away.
+                                                    last_purge_ms = 0;
                                                 }
                                             }
                                         }
@@ -1079,7 +1078,6 @@ fn run_worker(
                     &modal_image,
                     tracking,
                     tracking_ack,
-                    retention,
                     excluded_apps.clone(),
                     expanded_raw,
                     status_note.clone(),
@@ -1089,7 +1087,7 @@ fn run_worker(
                     theme_mode,
                     max_items,
                     expiry,
-                    groups: store.list_groups().unwrap_or_default(),
+                    store.list_groups().unwrap_or_default(),
                 );
             }
         }
@@ -1107,6 +1105,94 @@ mod tests {
         ClipboardChange, FlowOutcome, PasteConfidence, PasteMethod, PasteTriggerRecord,
         SourceConfidence,
     };
+
+    #[test]
+    fn enforce_limits_applies_expiry_and_count_and_spares_pinned_records() {
+        let day = 86_400_000;
+        let now = 100 * day;
+        let mut store = Store::open_in_memory().unwrap();
+        // 1: pinned and ancient, 2..=4: ancient, 5..=8: recent.
+        store.insert_record(&text_record(1, "p", 0)).unwrap();
+        for sequence in 2..=4 {
+            store
+                .insert_record(&text_record(sequence, "old", day))
+                .unwrap();
+        }
+        for sequence in 5..=8 {
+            store
+                .insert_record(&text_record(sequence, "new", now - i64::from(sequence)))
+                .unwrap();
+        }
+        store.set_pinned(&[1], true).unwrap();
+
+        let off = MaxItemsConfig {
+            enabled: false,
+            count: 1,
+        };
+        let expiry = ExpiryConfig {
+            enabled: true,
+            days: 30,
+        };
+        assert_eq!(enforce_limits(&mut store, expiry, off, now), 3);
+        assert_eq!(store.count_records().unwrap(), 5);
+
+        // Disabled settings never delete anything.
+        let none = ExpiryConfig {
+            enabled: false,
+            days: 1,
+        };
+        assert_eq!(enforce_limits(&mut store, none, off, now), 0);
+
+        // Keep the newest 2 unpinned records; the pinned one stays.
+        let max = MaxItemsConfig {
+            enabled: true,
+            count: 2,
+        };
+        assert_eq!(enforce_limits(&mut store, none, max, now), 2);
+        let kept: Vec<u32> = store
+            .load_all()
+            .unwrap()
+            .iter()
+            .map(|record| record.sequence)
+            .collect();
+        // Oldest first: the pinned record, then 6 (now - 6) and 5 (now - 5).
+        assert_eq!(kept, vec![1, 6, 5]);
+    }
+
+    #[test]
+    fn reloading_a_scrolled_page_keeps_every_row_from_the_top() {
+        let mut store = Store::open_in_memory().unwrap();
+        let total = HISTORY_PAGE_SIZE * 2 + 5;
+        for index in 0..total {
+            store
+                .insert_record(&text_record(
+                    index as u32 + 1,
+                    &format!("row {index}"),
+                    1_000 + index as i64,
+                ))
+                .unwrap();
+        }
+        let query = HistoryQuery {
+            page: 1,
+            ..HistoryQuery::default()
+        };
+        // A plain page-1 load only returns the second page ...
+        let (single, _) = history_loader::load_page(&store, &query, false, &|| true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(single.len(), HISTORY_PAGE_SIZE);
+        // ... while a reload "through" page 1 returns pages 0 and 1 together.
+        let (through, has_next) = history_loader::load_page(&store, &query, true, &|| true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(through.len(), HISTORY_PAGE_SIZE * 2);
+        assert!(has_next);
+        assert_eq!(through[0].sequence, total as u32);
+        assert_eq!(
+            through[HISTORY_PAGE_SIZE].sequence, single[0].sequence,
+            "page 1 must follow page 0 without a gap or repeat"
+        );
+    }
 
     pub(super) fn text_record(sequence: u32, text: &str, created_at_ms: i64) -> ClipboardRecord {
         let payload = ClipboardPayload::Text(text.to_string());

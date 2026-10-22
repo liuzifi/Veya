@@ -4,13 +4,6 @@ use iced::widget::column;
 impl App {
     /// Modern settings panel with 660px max width constraint and compact card group rows
     pub(super) fn settings_panel(&self) -> Element<'_, Message> {
-        let chip = |r: Retention, current: Retention| {
-            button(text(r.label()).size(12))
-                .on_press(Message::SetRetention(r))
-                .style(theme::chip_button(r == current))
-                .padding(pad(6.0, 12.0, 6.0, 12.0))
-        };
-
         // Modern sliding toggle switch representation
         let toggle_switch = button(
             row![if self.state.tracking {
@@ -89,29 +82,6 @@ impl App {
         .spacing(12)
         .align_y(Alignment::Center);
 
-        let retention_row = row![
-            icons::icon(Icon::History, theme::ACCENT(), 18.0),
-            column![
-                body("历史数据保留期限")
-                    .size(13)
-                    .font(crate::font::name_font()),
-                meta("超过此时长的历史记录与去向链将被自动彻底清理")
-                    .size(11)
-                    .color(theme::MUTED()),
-            ]
-            .spacing(2)
-            .width(Length::Fill),
-            row![
-                chip(Retention::Day1, self.state.retention),
-                chip(Retention::Day7, self.state.retention),
-                chip(Retention::Day30, self.state.retention),
-                chip(Retention::Never, self.state.retention),
-            ]
-            .spacing(6),
-        ]
-        .spacing(12)
-        .align_y(Alignment::Center);
-
         // Theme toggle chips (Dark / Light).
         let theme_chip = |mode: ThemeMode, current: ThemeMode| {
             button(text(mode.label()).size(12))
@@ -122,9 +92,7 @@ impl App {
         let theme_row = row![
             icons::icon(Icon::Search, theme::ACCENT(), 18.0),
             column![
-                body("界面主题")
-                    .size(13)
-                    .font(crate::font::name_font()),
+                body("界面主题").size(13).font(crate::font::name_font()),
                 meta("切换暗色或亮色皮肤，立即生效")
                     .size(11)
                     .color(theme::MUTED()),
@@ -140,129 +108,30 @@ impl App {
         .spacing(12)
         .align_y(Alignment::Center);
 
-        // Max items row: checkbox toggle + numeric input.
-        let max_items_toggle = button(
-            row![
-                container(Space::new(12.0, 12.0))
-                    .width(Length::Fixed(12.0))
-                    .height(Length::Fixed(12.0))
-                    .style(move |_t| iced::widget::container::Style {
-                        background: Some(theme::bg(if self.state.max_items.enabled {
-                            theme::ACCENT()
-                        } else {
-                            Color::TRANSPARENT
-                        })),
-                        border: iced::Border {
-                            color: if self.state.max_items.enabled {
-                                theme::ACCENT()
-                            } else {
-                                theme::MUTED()
-                            },
-                            width: 1.0,
-                            radius: 3.0.into(),
-                        },
-                        ..Default::default()
-                    }),
-                if self.state.max_items.enabled {
-                    text("✓").size(10).color(theme::BG())
-                } else {
-                    text("").size(10)
-                },
-            ]
-            .spacing(0)
-            .align_y(Alignment::Center),
-        )
-        .on_press(Message::ToggleMaxItems)
-        .style(theme::win_button)
-        .padding(2);
-
-        let max_items_input = text_input("1000", &self.max_items_input)
-            .on_input(Message::SetMaxItemsCount)
-            .padding(pad(6.0, 10.0, 6.0, 10.0))
-            .size(12)
-            .style(theme::input_style)
-            .width(Length::Fixed(80.0));
-
-        let max_items_row = row![
-            icons::icon(Icon::History, theme::ACCENT(), 18.0),
-            column![
-                body("保存条目最大数量")
-                    .size(13)
-                    .font(crate::font::name_font()),
-                meta("勾选后仅保留最新 N 条非固定记录，超出部分自动清理")
-                    .size(11)
-                    .color(theme::MUTED()),
-            ]
-            .spacing(2)
-            .width(Length::Fill),
-            max_items_toggle,
-            text("条").size(12).color(theme::MUTED()),
-            max_items_input,
-        ]
-        .spacing(12)
-        .align_y(Alignment::Center);
-
-        // Expiry days row: checkbox toggle + numeric input.
-        let expiry_toggle = button(
-            row![
-                container(Space::new(12.0, 12.0))
-                    .width(Length::Fixed(12.0))
-                    .height(Length::Fixed(12.0))
-                    .style(move |_t| iced::widget::container::Style {
-                        background: Some(theme::bg(if self.state.expiry.enabled {
-                            theme::ACCENT()
-                        } else {
-                            Color::TRANSPARENT
-                        })),
-                        border: iced::Border {
-                            color: if self.state.expiry.enabled {
-                                theme::ACCENT()
-                            } else {
-                                theme::MUTED()
-                            },
-                            width: 1.0,
-                            radius: 3.0.into(),
-                        },
-                        ..Default::default()
-                    }),
-                if self.state.expiry.enabled {
-                    text("✓").size(10).color(theme::BG())
-                } else {
-                    text("").size(10)
-                },
-            ]
-            .spacing(0)
-            .align_y(Alignment::Center),
-        )
-        .on_press(Message::ToggleExpiry)
-        .style(theme::win_button)
-        .padding(2);
-
-        let expiry_days_input = text_input("90", &self.expiry_days_input)
-            .on_input(Message::SetExpiryDays)
-            .padding(pad(6.0, 10.0, 6.0, 10.0))
-            .size(12)
-            .style(theme::input_style)
-            .width(Length::Fixed(80.0));
-
-        let expiry_row = row![
-            icons::icon(Icon::History, theme::ACCENT(), 18.0),
-            column![
-                body("粘贴条目过期天数")
-                    .size(13)
-                    .font(crate::font::name_font()),
-                meta("勾选后超过指定天数的非固定记录将被自动清理")
-                    .size(11)
-                    .color(theme::MUTED()),
-            ]
-            .spacing(2)
-            .width(Length::Fill),
-            expiry_toggle,
-            text("天").size(12).color(theme::MUTED()),
-            expiry_days_input,
-        ]
-        .spacing(12)
-        .align_y(Alignment::Center);
+        let max_items_row = limit_row(LimitRow {
+            title: "保存复制项目的最大数量",
+            hint: "超出后自动删除最旧的记录；已固定和已加入分组的记录不受影响",
+            unit: "条",
+            placeholder: "1000",
+            enabled: self.state.max_items.enabled,
+            draft: &self.max_items_input,
+            changed: self.max_items_input != self.state.max_items.count.to_string(),
+            on_toggle: Message::ToggleMaxItems,
+            on_input: Message::MaxItemsInput,
+            on_apply: Message::ApplyMaxItems,
+        });
+        let expiry_row = limit_row(LimitRow {
+            title: "粘贴条目过期时间",
+            hint: "超过设定天数的记录自动删除；已固定和已加入分组的记录不受影响",
+            unit: "天",
+            placeholder: "90",
+            enabled: self.state.expiry.enabled,
+            draft: &self.expiry_days_input,
+            changed: self.expiry_days_input != self.state.expiry.days.to_string(),
+            on_toggle: Message::ToggleExpiry,
+            on_input: Message::ExpiryDaysInput,
+            on_apply: Message::ApplyExpiryDays,
+        });
 
         let group_appearance = container(
             column![
@@ -364,10 +233,6 @@ impl App {
         let group_privacy = container(
             column![
                 tracking_row,
-                Space::with_height(12.0),
-                theme::hdivider(),
-                Space::with_height(12.0),
-                retention_row,
                 Space::with_height(12.0),
                 theme::hdivider(),
                 Space::with_height(12.0),
@@ -692,4 +557,105 @@ impl App {
         .on_press(Message::CancelClearHistory)
         .into()
     }
+}
+
+/// Everything one "checkbox + number box" settings row needs.
+struct LimitRow<'a> {
+    title: &'a str,
+    hint: &'a str,
+    unit: &'a str,
+    placeholder: &'a str,
+    enabled: bool,
+    /// Text currently typed in the number box (not yet applied).
+    draft: &'a str,
+    /// The draft differs from the value in effect, so the apply button is highlighted.
+    changed: bool,
+    on_toggle: fn(bool) -> Message,
+    on_input: fn(String) -> Message,
+    on_apply: Message,
+}
+
+/// A settings row that starts with a checkbox, then the title, then a number box and an
+/// apply button. The number box is only editable while the checkbox is ticked, and nothing
+/// takes effect (or deletes any history) until the value is applied with Enter or the button.
+fn limit_row(spec: LimitRow<'_>) -> Element<'_, Message> {
+    let LimitRow {
+        title,
+        hint,
+        unit,
+        placeholder,
+        enabled,
+        draft,
+        changed,
+        on_toggle,
+        on_input,
+        on_apply,
+    } = spec;
+
+    let mark: Element<'_, Message> = if enabled {
+        icons::icon(Icon::Check, theme::ON_ACCENT(), 12.0).into()
+    } else {
+        Space::new(12.0, 12.0).into()
+    };
+    let checkbox = button(
+        container(mark)
+            .width(Length::Fixed(20.0))
+            .height(Length::Fixed(20.0))
+            .center_x(Length::Fixed(20.0))
+            .center_y(Length::Fixed(20.0))
+            .style(move |_t| iced::widget::container::Style {
+                background: Some(theme::bg(if enabled {
+                    theme::ACCENT()
+                } else {
+                    theme::CHIP_BG()
+                })),
+                border: iced::Border {
+                    color: if enabled {
+                        theme::ACCENT_BORDER()
+                    } else {
+                        theme::BORDER()
+                    },
+                    width: 1.0,
+                    radius: 5.0.into(),
+                },
+                ..Default::default()
+            }),
+    )
+    .on_press(on_toggle(!enabled))
+    .style(theme::win_button)
+    .padding(0);
+
+    let mut field = text_input(placeholder, draft)
+        .padding(pad(6.0, 10.0, 6.0, 10.0))
+        .size(12)
+        .style(theme::field_style)
+        .width(Length::Fixed(84.0));
+    if enabled {
+        field = field.on_input(on_input).on_submit(on_apply.clone());
+    }
+    let apply = button(text("应用").size(12))
+        .on_press_maybe((enabled && changed).then_some(on_apply))
+        .style(if changed {
+            theme::primary_button
+        } else {
+            theme::action_button
+        })
+        .padding(pad(6.0, 12.0, 6.0, 12.0));
+
+    row![
+        checkbox,
+        icons::icon(Icon::History, theme::ACCENT(), 18.0),
+        column![
+            body(title).size(13).font(crate::font::name_font()),
+            meta(hint).size(11).color(theme::MUTED()),
+        ]
+        .spacing(2)
+        .width(Length::Fill),
+        field,
+        text(unit).size(12).color(theme::MUTED()),
+        apply,
+    ]
+    .spacing(12)
+    .align_y(Alignment::Center)
+    .into()
 }

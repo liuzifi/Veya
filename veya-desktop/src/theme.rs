@@ -98,23 +98,61 @@ pub fn set_palette(p: &'static Palette) {
 // Color accessors (drop-in replacements for the former `pub const` values)
 // ---------------------------------------------------------------------------
 
-pub fn BG() -> Color { palette().bg }
-pub fn SIDEBAR() -> Color { palette().sidebar }
-pub fn SURFACE() -> Color { palette().surface }
-pub fn ELEVATED() -> Color { palette().elevated }
-pub fn BORDER() -> Color { palette().border }
-pub fn WINDOW_BORDER() -> Color { palette().window_border }
-pub fn BORDER_SUBTLE() -> Color { palette().border_subtle }
-pub fn INK() -> Color { palette().ink }
-pub fn MUTED() -> Color { palette().muted }
-pub fn FAINT() -> Color { palette().faint }
-pub fn ACCENT() -> Color { palette().accent }
-pub fn ACCENT_SOFT() -> Color { palette().accent_soft }
-pub fn ACCENT_BORDER() -> Color { palette().accent_border }
-pub fn DANGER() -> Color { palette().danger }
-pub fn OK() -> Color { palette().ok }
-pub fn WARN() -> Color { palette().warn }
-pub fn CHIP_BG() -> Color { palette().chip_bg }
+pub fn BG() -> Color {
+    palette().bg
+}
+pub fn SIDEBAR() -> Color {
+    palette().sidebar
+}
+pub fn SURFACE() -> Color {
+    palette().surface
+}
+pub fn ELEVATED() -> Color {
+    palette().elevated
+}
+pub fn BORDER() -> Color {
+    palette().border
+}
+pub fn WINDOW_BORDER() -> Color {
+    palette().window_border
+}
+pub fn BORDER_SUBTLE() -> Color {
+    palette().border_subtle
+}
+pub fn INK() -> Color {
+    palette().ink
+}
+pub fn MUTED() -> Color {
+    palette().muted
+}
+pub fn FAINT() -> Color {
+    palette().faint
+}
+pub fn ACCENT() -> Color {
+    palette().accent
+}
+pub fn ACCENT_SOFT() -> Color {
+    palette().accent_soft
+}
+pub fn ACCENT_BORDER() -> Color {
+    palette().accent_border
+}
+pub fn DANGER() -> Color {
+    palette().danger
+}
+pub fn OK() -> Color {
+    palette().ok
+}
+pub fn WARN() -> Color {
+    palette().warn
+}
+pub fn CHIP_BG() -> Color {
+    palette().chip_bg
+}
+/// Text and icons drawn on a solid `ACCENT()` background; identical in both palettes.
+pub fn ON_ACCENT() -> Color {
+    Color::from_rgb(0.97, 0.98, 1.0)
+}
 
 // ---------------------------------------------------------------------------
 // Primitives
@@ -418,7 +456,7 @@ pub fn primary_button(_t: &Theme, status: button::Status) -> button::Style {
                 (p.accent.g + 0.08).min(1.0),
                 (p.accent.b + 0.04).min(1.0),
             ),
-            INK(),
+            ON_ACCENT(),
         ),
         button::Status::Pressed => (
             Color::from_rgb(
@@ -426,9 +464,9 @@ pub fn primary_button(_t: &Theme, status: button::Status) -> button::Style {
                 (p.accent.g - 0.06).max(0.0),
                 (p.accent.b - 0.08).max(0.0),
             ),
-            INK(),
+            ON_ACCENT(),
         ),
-        _ => (ACCENT(), INK()),
+        _ => (ACCENT(), ON_ACCENT()),
     };
     button::Style {
         background: Some(bg(bg_c)),
@@ -493,7 +531,7 @@ pub fn nav_button(active: bool) -> impl Fn(&Theme, button::Status) -> button::St
 pub fn chip_button(selected: bool) -> impl Fn(&Theme, button::Status) -> button::Style + 'static {
     move |_t: &Theme, status: button::Status| {
         let (bg_c, border_c, text_c) = if selected {
-            (ACCENT(), ACCENT_BORDER(), INK())
+            (ACCENT(), ACCENT_BORDER(), ON_ACCENT())
         } else {
             match status {
                 button::Status::Hovered => (ELEVATED(), BORDER(), INK()),
@@ -517,7 +555,7 @@ pub fn toolbar_filter_button(
         if selected {
             button::Style {
                 background: Some(bg(ACCENT())),
-                text_color: INK(),
+                text_color: ON_ACCENT(),
                 border: stroke(ACCENT_BORDER(), 1.0, 8.0),
                 ..Default::default()
             }
@@ -635,12 +673,34 @@ pub fn input_style(_t: &Theme, status: text_input::Status) -> text_input::Style 
     }
 }
 
+/// Bordered number field for the settings page. [`input_style`] only draws a frame while
+/// focused, which leaves a standalone number box looking like loose text.
+pub fn field_style(_t: &Theme, status: text_input::Status) -> text_input::Style {
+    let (border_c, bg_c, value_c) = match status {
+        text_input::Status::Focused => (ACCENT(), SURFACE(), INK()),
+        text_input::Status::Hovered => (ACCENT_BORDER(), CHIP_BG(), INK()),
+        text_input::Status::Disabled => (BORDER_SUBTLE(), CHIP_BG(), FAINT()),
+        _ => (BORDER(), CHIP_BG(), INK()),
+    };
+    text_input::Style {
+        background: bg(bg_c),
+        border: stroke(border_c, 1.0, 8.0),
+        icon: FAINT(),
+        placeholder: FAINT(),
+        value: value_c,
+        selection: ACCENT_SOFT(),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Text helpers
 // ---------------------------------------------------------------------------
 
 pub fn section_label<'a>(s: impl iced::widget::text::IntoFragment<'a>) -> text::Text<'a, Theme> {
-    text(s).size(13).color(MUTED()).font(crate::font::name_font())
+    text(s)
+        .size(13)
+        .color(MUTED())
+        .font(crate::font::name_font())
 }
 
 /// Container chrome matching a quiet chip (sort dropdown / view toggle).

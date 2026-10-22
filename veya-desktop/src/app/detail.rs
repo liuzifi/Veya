@@ -3,7 +3,7 @@ use iced::widget::column;
 
 impl App {
     pub(super) fn detail_panel(&self) -> Element<'_, Message> {
-        if self.history_query_pending() {
+        if self.history_list_pending() {
             return container(meta("正在加载当前记录…").color(theme::MUTED()))
                 .width(Length::Fill)
                 .height(Length::Fill)
@@ -41,7 +41,7 @@ impl App {
         let (copy_label, copy_icon, copy_color) = if self.copied_tick > 0 {
             ("已复制", Icon::Check, theme::OK())
         } else {
-            ("复制", Icon::Copy, theme::INK())
+            ("复制", Icon::Copy, theme::ON_ACCENT())
         };
 
         // Semantic header summary (avoids 100% duplicating full content & word wrapping breaks)
@@ -596,8 +596,8 @@ impl App {
                 .padding(pad(8.0, 13.0, 8.0, 13.0)),
             button(
                 row![
-                    icons::icon(Icon::Copy, theme::INK(), 14.0),
-                    text(copy_label).size(12).color(theme::INK()),
+                    icons::icon(Icon::Copy, theme::ON_ACCENT(), 14.0),
+                    text(copy_label).size(12).color(theme::ON_ACCENT()),
                 ]
                 .spacing(6)
                 .align_y(Alignment::Center),

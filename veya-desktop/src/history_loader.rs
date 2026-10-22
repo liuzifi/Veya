@@ -13,6 +13,8 @@ use veya_storage::{Store, Thumbnail};
 struct Request {
     generation: u64,
     query: HistoryQuery,
+    /// Load pages `0..=query.page` as one batch instead of only page `query.page`.
+    through: bool,
 }
 #[derive(Default)]
 struct Mailbox {
@@ -75,7 +77,7 @@ impl Loader {
                     };
                     let current = || epoch.load(Ordering::Acquire) == request.generation;
                     let result = match &mut store {
-                        Ok(store) => load_page(store, &request.query, &current),
+                        Ok(store) => load_page(store, &request.query, request.through, &current),
                         Err(message) => Err(message.clone()),
                     };
                     match result {
@@ -181,11 +183,20 @@ impl Loader {
             .wrapping_add(1)
     }
     pub fn request(&self, query: &HistoryQuery) -> u64 {
+        self.send(query, false)
+    }
+    /// Reload everything from the top through `query.page`, so an infinite-scroll list that
+    /// was already scrolled down keeps all of its rows after a reload.
+    pub fn request_through(&self, query: &HistoryQuery) -> u64 {
+        self.send(query, query.page > 0)
+    }
+    fn send(&self, query: &HistoryQuery, through: bool) -> u64 {
         let generation = self.cancel();
         let (lock, ready) = &*self.mailbox;
         lock.lock().unwrap().request = Some(Request {
             generation,
             query: query.clone(),
+            through,
         });
         ready.notify_one();
         generation
@@ -371,6 +382,7 @@ fn matches(summary: &HistorySummary, query: &HistoryQuery) -> bool {
 pub(super) fn load_page(
     store: &Store,
     query: &HistoryQuery,
+    through: bool,
     current: &impl Fn() -> bool,
 ) -> Result<Option<(Vec<CardView>, bool)>, String> {
     let group_members: Option<std::collections::HashSet<i64>> = match query.group_id {
@@ -387,7 +399,15 @@ pub(super) fn load_page(
     let mut aggregator = HistoryAggregator::new(query.newest_first);
     let mut cards = Vec::with_capacity(HISTORY_PAGE_SIZE);
     let mut matched = 0usize;
-    let skip = query.page.saturating_mul(HISTORY_PAGE_SIZE);
+    let end = query
+        .page
+        .saturating_add(1)
+        .saturating_mul(HISTORY_PAGE_SIZE);
+    let skip = if through {
+        0
+    } else {
+        query.page.saturating_mul(HISTORY_PAGE_SIZE)
+    };
     let mut consume = |summary: HistorySummary| {
         if let Some(members) = &group_members {
             if !members.contains(&i64::from(summary.representative.sequence)) {
@@ -395,7 +415,7 @@ pub(super) fn load_page(
             }
         }
         if matches(&summary, query) {
-            if matched >= skip.saturating_add(HISTORY_PAGE_SIZE) {
+            if matched >= end {
                 return true;
             }
             if matched >= skip {

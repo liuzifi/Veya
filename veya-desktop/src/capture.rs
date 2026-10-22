@@ -152,7 +152,32 @@ impl Default for MaxItemsConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            count: 1000,
+            count: Self::DEFAULT_COUNT,
+        }
+    }
+}
+
+impl MaxItemsConfig {
+    pub const DEFAULT_COUNT: u32 = 1000;
+    pub const MIN_COUNT: u32 = 1;
+    pub const MAX_COUNT: u32 = 100_000;
+
+    /// Parse a user-entered count. Only a plain integer inside the allowed range is valid.
+    pub fn parse_count(input: &str) -> Option<u32> {
+        let value = input.trim().parse::<u32>().ok()?;
+        (Self::MIN_COUNT..=Self::MAX_COUNT)
+            .contains(&value)
+            .then_some(value)
+    }
+
+    /// Rebuild the setting from its stored values; anything missing or invalid falls back to
+    /// "disabled, 1000".
+    pub fn from_settings(enabled: Option<&str>, count: Option<&str>) -> Self {
+        Self {
+            enabled: enabled == Some("1"),
+            count: count
+                .and_then(Self::parse_count)
+                .unwrap_or(Self::DEFAULT_COUNT),
         }
     }
 }
@@ -167,55 +192,63 @@ pub struct ExpiryConfig {
 impl Default for ExpiryConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
-            days: 90,
+            enabled: true,
+            days: Self::DEFAULT_DAYS,
         }
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Retention {
-    Day1,
-    Day7,
-    #[default]
-    Day30,
-    Never,
-}
+impl ExpiryConfig {
+    pub const DEFAULT_DAYS: u32 = 90;
+    pub const MIN_DAYS: u32 = 1;
+    pub const MAX_DAYS: u32 = 3650;
 
-impl Retention {
-    pub fn label(self) -> &'static str {
-        match self {
-            Retention::Day1 => "1 天",
-            Retention::Day7 => "7 天",
-            Retention::Day30 => "30 天",
-            Retention::Never => "永不",
+    /// Parse a user-entered number of days. Only a plain integer inside the allowed range is
+    /// valid.
+    pub fn parse_days(input: &str) -> Option<u32> {
+        let value = input.trim().parse::<u32>().ok()?;
+        (Self::MIN_DAYS..=Self::MAX_DAYS)
+            .contains(&value)
+            .then_some(value)
+    }
+
+    /// Rebuild the setting from its stored values.
+    ///
+    /// Versions before 0.2.6 stored a fixed `retention` choice (`day1`, `day7`, `day30`,
+    /// `never`). When no expiry value has been saved yet that choice is carried over, so an
+    /// upgrade keeps the user's old policy. With neither stored, expiry is on for 90 days.
+    pub fn from_settings(
+        enabled: Option<&str>,
+        days: Option<&str>,
+        legacy_retention: Option<&str>,
+    ) -> Self {
+        let (legacy_enabled, legacy_days) = match legacy_retention {
+            Some("day1") => (true, 1),
+            Some("day7") => (true, 7),
+            Some("day30") => (true, 30),
+            Some("never") => (false, Self::DEFAULT_DAYS),
+            _ => (true, Self::DEFAULT_DAYS),
+        };
+        Self {
+            enabled: match enabled {
+                Some(value) => value == "1",
+                None => legacy_enabled,
+            },
+            days: days.and_then(Self::parse_days).unwrap_or(
+                if enabled.is_some() || days.is_some() {
+                    Self::DEFAULT_DAYS
+                } else {
+                    legacy_days
+                },
+            ),
         }
     }
 
-    pub fn as_key(self) -> &'static str {
-        match self {
-            Retention::Day1 => "day1",
-            Retention::Day7 => "day7",
-            Retention::Day30 => "day30",
-            Retention::Never => "never",
-        }
-    }
-
-    pub fn from_key(s: &str) -> Self {
-        match s {
-            "day1" => Retention::Day1,
-            "day7" => Retention::Day7,
-            "never" => Retention::Never,
-            _ => Retention::Day30,
-        }
-    }
-
-    pub fn cutoff_ms(self, now_ms: i64) -> Option<i64> {
-        match self {
-            Retention::Day1 => Some(now_ms - 24 * 60 * 60 * 1000),
-            Retention::Day7 => Some(now_ms - 7 * 24 * 60 * 60 * 1000),
-            Retention::Day30 => Some(now_ms - 30 * 24 * 60 * 60 * 1000),
-            Retention::Never => None,
+    pub fn label(self) -> String {
+        if self.enabled {
+            format!("{} 天", self.days)
+        } else {
+            "永不".to_string()
         }
     }
 }
@@ -229,12 +262,14 @@ pub struct UiState {
     pub history_active: bool,
     pub history_has_next: bool,
     pub history_loading: bool,
+    /// The in-flight load adds the next page to the rows already shown (infinite scroll),
+    /// rather than replacing them.
+    pub history_appending: bool,
     pub detail_content: Option<(u32, Arc<str>)>,
     pub detail_error: Option<(u32, String)>,
     pub modal_image: Option<(u32, iced::widget::image::Handle)>,
     pub selected: Option<u32>,
     pub record_count: usize,
-    pub retention: Retention,
     pub tracking: bool,
     /// Last tracking toggle requested by the UI and applied by the worker.
     pub tracking_ack: u64,
@@ -327,6 +362,108 @@ pub fn card_view_from_summary(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn expiry_defaults_to_ninety_days_enabled() {
+        assert_eq!(
+            ExpiryConfig::from_settings(None, None, None),
+            ExpiryConfig {
+                enabled: true,
+                days: 90
+            }
+        );
+    }
+
+    #[test]
+    fn expiry_carries_over_the_legacy_retention_choice() {
+        let migrated = |legacy| ExpiryConfig::from_settings(None, None, Some(legacy));
+        assert_eq!(
+            migrated("day1"),
+            ExpiryConfig {
+                enabled: true,
+                days: 1
+            }
+        );
+        assert_eq!(
+            migrated("day7"),
+            ExpiryConfig {
+                enabled: true,
+                days: 7
+            }
+        );
+        assert_eq!(
+            migrated("day30"),
+            ExpiryConfig {
+                enabled: true,
+                days: 30
+            }
+        );
+        assert_eq!(
+            migrated("never"),
+            ExpiryConfig {
+                enabled: false,
+                days: 90
+            }
+        );
+    }
+
+    #[test]
+    fn saved_expiry_values_win_over_the_legacy_retention_choice() {
+        assert_eq!(
+            ExpiryConfig::from_settings(Some("0"), Some("14"), Some("day1")),
+            ExpiryConfig {
+                enabled: false,
+                days: 14
+            }
+        );
+        assert_eq!(
+            ExpiryConfig::from_settings(Some("1"), Some("bad"), Some("day1")),
+            ExpiryConfig {
+                enabled: true,
+                days: 90
+            }
+        );
+    }
+
+    #[test]
+    fn expiry_and_max_items_inputs_must_be_plain_in_range_integers() {
+        assert_eq!(ExpiryConfig::parse_days("90"), Some(90));
+        assert_eq!(ExpiryConfig::parse_days(" 7 "), Some(7));
+        assert_eq!(ExpiryConfig::parse_days(""), None);
+        assert_eq!(ExpiryConfig::parse_days("0"), None);
+        assert_eq!(ExpiryConfig::parse_days("3651"), None);
+        assert_eq!(ExpiryConfig::parse_days("-3"), None);
+        assert_eq!(ExpiryConfig::parse_days("1.5"), None);
+        assert_eq!(MaxItemsConfig::parse_count("1000"), Some(1000));
+        assert_eq!(MaxItemsConfig::parse_count("0"), None);
+        assert_eq!(MaxItemsConfig::parse_count("100001"), None);
+        assert_eq!(MaxItemsConfig::parse_count("abc"), None);
+    }
+
+    #[test]
+    fn max_items_defaults_to_disabled_with_a_thousand_and_ignores_bad_values() {
+        assert_eq!(
+            MaxItemsConfig::from_settings(None, None),
+            MaxItemsConfig {
+                enabled: false,
+                count: 1000
+            }
+        );
+        assert_eq!(
+            MaxItemsConfig::from_settings(Some("1"), Some("250")),
+            MaxItemsConfig {
+                enabled: true,
+                count: 250
+            }
+        );
+        assert_eq!(
+            MaxItemsConfig::from_settings(Some("1"), Some("0")),
+            MaxItemsConfig {
+                enabled: true,
+                count: 1000
+            }
+        );
+    }
+
     use super::*;
 
     pub(super) fn summary(content: String) -> HistorySummary {

@@ -14,8 +14,8 @@ use std::collections::HashMap;
 use std::sync::OnceLock;
 
 use crate::capture::{
-    CardPayloadView, CardView, ExpiryConfig, GroupSummary, HistoryFilter, HistoryQuery,
-    MaxItemsConfig, Retention, SharedUi, ThemeMode, UiState,
+    CardPayloadView, CardView, ExpiryConfig, HistoryFilter, HistoryQuery, MaxItemsConfig, SharedUi,
+    ThemeMode, UiState,
 };
 use crate::format::{self, ContentKind};
 use crate::icons::{self, Icon};
@@ -267,6 +267,8 @@ pub struct App {
     exclude_input: String,
     max_items_input: String,
     expiry_days_input: String,
+    /// The number boxes take their first value from the saved settings loaded by the worker.
+    limit_inputs_synced: bool,
     detail_menu_open: bool,
     card_menu: Option<CardMenu>,
     quick_group_sel: Option<i64>,
@@ -359,7 +361,6 @@ pub enum Message {
     Unexclude(String),
     ExcludeInput(String),
     ExcludeSubmit,
-    SetRetention(Retention),
     ToggleTracking,
     RequestClearHistory,
     ConfirmClearHistory,
@@ -395,10 +396,12 @@ pub enum Message {
     WindowClose,
     SetHotkey(Hotkey),
     SetThemeMode(ThemeMode),
-    ToggleMaxItems,
-    SetMaxItemsCount(String),
-    ToggleExpiry,
-    SetExpiryDays(String),
+    ToggleMaxItems(bool),
+    MaxItemsInput(String),
+    ApplyMaxItems,
+    ToggleExpiry(bool),
+    ExpiryDaysInput(String),
+    ApplyExpiryDays,
     StartHotkeyRecord,
     CancelHotkeyRecord,
     RecordHotkeyKey(Key, Physical, Modifiers),
@@ -423,13 +426,14 @@ impl App {
         let tray_rx = tray::spawn_tray(tray_tx).ok().map(|_| tray_rx);
 
         if let Ok(mut guard) = shared.lock() {
-            guard.retention = Retention::default();
             guard.tracking = true;
-            guard.theme_mode = ThemeMode::default();
+            guard.theme_mode = crate::worker::saved_theme_mode();
             guard.max_items = MaxItemsConfig::default();
             guard.expiry = ExpiryConfig::default();
         }
         let state = shared.lock().map(|g| g.clone()).unwrap_or_default();
+        let max_items_input = state.max_items.count.to_string();
+        let expiry_days_input = state.expiry.days.to_string();
         crate::theme::set_palette(match state.theme_mode {
             ThemeMode::Dark => &crate::theme::DARK,
             ThemeMode::Light => &crate::theme::LIGHT,
@@ -459,8 +463,9 @@ impl App {
                 history_active: false,
                 list_density: ListDensity::default(),
                 exclude_input: String::new(),
-                max_items_input: state.max_items.count.to_string(),
-                expiry_days_input: state.expiry.days.to_string(),
+                max_items_input,
+                expiry_days_input,
+                limit_inputs_synced: false,
                 detail_menu_open: false,
                 card_menu: None,
                 quick_group_sel: None,
@@ -506,6 +511,25 @@ impl App {
             page: self.history_page,
             group_id,
         }
+    }
+
+    /// Like [`Self::history_query_pending`], but a load that only adds the next page to the
+    /// list already on screen (infinite scroll) does not count: those rows stay valid and
+    /// must not be replaced by a loading placeholder, which would also reset the scroll
+    /// position.
+    pub(super) fn history_list_pending(&self) -> bool {
+        let wanted = self.history_query();
+        let shown = &self.state.history_query;
+        let same_list = shown.search == wanted.search
+            && shown.filter == wanted.filter
+            && shown.pinned_only == wanted.pinned_only
+            && shown.newest_first == wanted.newest_first
+            && shown.group_id == wanted.group_id;
+        let page_ok = wanted.page == shown.page || wanted.page == shown.page.saturating_add(1);
+        if !same_list || !page_ok || (self.history_active && !self.state.history_active) {
+            return true;
+        }
+        self.state.history_loading && !self.state.history_appending
     }
 
     pub(super) fn history_query_pending(&self) -> bool {
@@ -579,7 +603,7 @@ impl App {
         let wanted = if self.history_active
             && !self.window_hidden
             && self.quick.is_none()
-            && !self.history_query_pending()
+            && !self.history_list_pending()
         {
             self.content_modal_for.or(self.state.selected)
         } else {
@@ -652,10 +676,10 @@ impl App {
         if !matches!(
             &message,
             Message::Tick
-            | Message::CursorMoved(_)
-            | Message::OpenCardMenu(_)
-            | Message::QuickOpenCardMenu(_)
-            | Message::QuickGroupInputChanged(_)
+                | Message::CursorMoved(_)
+                | Message::OpenCardMenu(_)
+                | Message::QuickOpenCardMenu(_)
+                | Message::QuickGroupInputChanged(_)
         ) {
             self.card_menu = None;
         }
@@ -715,16 +739,11 @@ impl App {
                     } else {
                         match input.mode {
                             QuickGroupInputMode::Create => {
-                                let _ = self
-                                    .worker
-                                    .cmd_tx
-                                    .send(WorkerCmd::CreateGroup { name });
+                                let _ = self.worker.cmd_tx.send(WorkerCmd::CreateGroup { name });
                             }
                             QuickGroupInputMode::Rename { id } => {
-                                let _ = self
-                                    .worker
-                                    .cmd_tx
-                                    .send(WorkerCmd::RenameGroup { id, name });
+                                let _ =
+                                    self.worker.cmd_tx.send(WorkerCmd::RenameGroup { id, name });
                             }
                         }
                     }
@@ -875,24 +894,11 @@ impl App {
                         .filter(|seq| next.cards.iter().any(|c| c.sequence == *seq))
                         .or_else(|| next.cards.first().map(|c| c.sequence));
                     next.expanded_raw = self.state.expanded_raw;
-                    // Sync text input fields from worker state when the worker
-                    // loaded persisted settings on startup or resolved a value.
-                    if self.max_items_input.is_empty()
-                        || self
-                            .max_items_input
-                            .parse::<u32>()
-                            .map(|v| v != next.max_items.count)
-                            .unwrap_or(true)
-                    {
+                    // The number boxes start from the saved settings; after that they are
+                    // drafts that only change when the user edits or applies them.
+                    if !self.limit_inputs_synced {
+                        self.limit_inputs_synced = true;
                         self.max_items_input = next.max_items.count.to_string();
-                    }
-                    if self.expiry_days_input.is_empty()
-                        || self
-                            .expiry_days_input
-                            .parse::<u32>()
-                            .map(|v| v != next.expiry.days)
-                            .unwrap_or(true)
-                    {
                         self.expiry_days_input = next.expiry.days.to_string();
                     }
                     self.state = next;
@@ -1012,54 +1018,80 @@ impl App {
                 }
                 Task::none()
             }
-            Message::SetRetention(r) => {
-                let _ = self.worker.cmd_tx.send(WorkerCmd::SetRetention(r));
-                self.state.retention = r;
-                Task::none()
-            }
             Message::SetThemeMode(mode) => {
                 self.state.theme_mode = mode;
                 let _ = self.worker.cmd_tx.send(WorkerCmd::SetThemeMode(mode));
                 Task::none()
             }
-            Message::ToggleMaxItems => {
+            Message::ToggleMaxItems(enabled) => {
                 let cfg = MaxItemsConfig {
-                    enabled: !self.state.max_items.enabled,
+                    enabled,
                     count: self.state.max_items.count,
                 };
                 self.state.max_items = cfg;
                 let _ = self.worker.cmd_tx.send(WorkerCmd::SetMaxItems(cfg));
                 Task::none()
             }
-            Message::SetMaxItemsCount(s) => {
-                self.max_items_input = s.clone();
-                let count = s.parse::<u32>().unwrap_or(0).max(1).min(100_000);
-                let cfg = MaxItemsConfig {
-                    enabled: self.state.max_items.enabled,
-                    count,
-                };
-                self.state.max_items = cfg;
-                let _ = self.worker.cmd_tx.send(WorkerCmd::SetMaxItems(cfg));
+            Message::MaxItemsInput(value) => {
+                // Typing only edits the draft; nothing is deleted until the user applies it.
+                self.max_items_input = digits_only(&value, 6);
                 Task::none()
             }
-            Message::ToggleExpiry => {
+            Message::ApplyMaxItems => {
+                match MaxItemsConfig::parse_count(&self.max_items_input) {
+                    Some(count) => {
+                        let cfg = MaxItemsConfig {
+                            enabled: self.state.max_items.enabled,
+                            count,
+                        };
+                        self.max_items_input = count.to_string();
+                        self.state.max_items = cfg;
+                        let _ = self.worker.cmd_tx.send(WorkerCmd::SetMaxItems(cfg));
+                    }
+                    None => {
+                        self.state.status_note = format!(
+                            "最大保存条数需为 {}–{} 之间的整数",
+                            MaxItemsConfig::MIN_COUNT,
+                            MaxItemsConfig::MAX_COUNT
+                        );
+                        self.max_items_input = self.state.max_items.count.to_string();
+                    }
+                }
+                Task::none()
+            }
+            Message::ToggleExpiry(enabled) => {
                 let cfg = ExpiryConfig {
-                    enabled: !self.state.expiry.enabled,
+                    enabled,
                     days: self.state.expiry.days,
                 };
                 self.state.expiry = cfg;
                 let _ = self.worker.cmd_tx.send(WorkerCmd::SetExpiry(cfg));
                 Task::none()
             }
-            Message::SetExpiryDays(s) => {
-                self.expiry_days_input = s.clone();
-                let days = s.parse::<u32>().unwrap_or(0).max(1).min(3650);
-                let cfg = ExpiryConfig {
-                    enabled: self.state.expiry.enabled,
-                    days,
-                };
-                self.state.expiry = cfg;
-                let _ = self.worker.cmd_tx.send(WorkerCmd::SetExpiry(cfg));
+            Message::ExpiryDaysInput(value) => {
+                self.expiry_days_input = digits_only(&value, 4);
+                Task::none()
+            }
+            Message::ApplyExpiryDays => {
+                match ExpiryConfig::parse_days(&self.expiry_days_input) {
+                    Some(days) => {
+                        let cfg = ExpiryConfig {
+                            enabled: self.state.expiry.enabled,
+                            days,
+                        };
+                        self.expiry_days_input = days.to_string();
+                        self.state.expiry = cfg;
+                        let _ = self.worker.cmd_tx.send(WorkerCmd::SetExpiry(cfg));
+                    }
+                    None => {
+                        self.state.status_note = format!(
+                            "过期天数需为 {}–{} 之间的整数",
+                            ExpiryConfig::MIN_DAYS,
+                            ExpiryConfig::MAX_DAYS
+                        );
+                        self.expiry_days_input = self.state.expiry.days.to_string();
+                    }
+                }
                 Task::none()
             }
             Message::ToggleTracking => {
@@ -1615,7 +1647,7 @@ impl App {
             meta(format!(
                 "{} 条记录 · {}",
                 self.state.record_count,
-                self.state.retention.label()
+                self.state.expiry.label()
             ))
             .size(11)
             .color(theme::FAINT()),
@@ -2135,6 +2167,15 @@ fn detail_content_preview(content: &str) -> (String, bool) {
         preview.push('…');
     }
     (preview, truncated)
+}
+
+/// Keep only ASCII digits (at most `max_len` of them) from user input.
+fn digits_only(input: &str, max_len: usize) -> String {
+    input
+        .chars()
+        .filter(char::is_ascii_digit)
+        .take(max_len)
+        .collect()
 }
 
 fn history_scroll_id() -> scrollable::Id {

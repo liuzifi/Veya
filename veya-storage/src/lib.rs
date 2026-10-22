@@ -664,10 +664,9 @@ impl Store {
         )
     }
 
-    /// Keep at most `max` non-pinned, non-grouped records (by ascending
-    /// sequence, i.e. oldest first).  Pinned records and card-group members
-    /// are always exempt and do **not** count toward the `max` quota.
-    /// Returns rows removed.
+    /// Keep the newest `max` non-pinned, non-grouped records and delete the
+    /// older ones.  Pinned records and card-group members are always exempt and
+    /// do **not** count toward the `max` quota.  Returns rows removed.
     pub fn trim_to_max_count(&mut self, max: usize) -> rusqlite::Result<usize> {
         if max == 0 {
             // Delete all non-pinned, non-grouped records.
@@ -686,7 +685,7 @@ impl Store {
                 "SELECT sequence FROM clipboard_record
                   WHERE pinned = 0
                     AND sequence NOT IN (SELECT sequence FROM card_group_member)
-                  ORDER BY sequence ASC
+                  ORDER BY created_at_ms DESC, sequence DESC
                   LIMIT -1 OFFSET ?1",
             )?;
             let rows = stmt.query_map(params![max as i64], |row| row.get::<_, i64>(0))?;
@@ -739,7 +738,11 @@ impl Store {
     pub fn create_group(&mut self, name: &str, now_ms: i64) -> rusqlite::Result<i64> {
         let pos: i64 = self
             .conn
-            .query_row("SELECT COALESCE(MAX(position), -1) + 1 FROM card_group", [], |r| r.get(0))
+            .query_row(
+                "SELECT COALESCE(MAX(position), -1) + 1 FROM card_group",
+                [],
+                |r| r.get(0),
+            )
             .unwrap_or(0);
         self.conn.execute(
             "INSERT INTO card_group (name, position, created_at_ms) VALUES (?1, ?2, ?3)",
@@ -759,7 +762,8 @@ impl Store {
     /// Delete a group.  Member records themselves are preserved — only the
     /// grouping association is removed (ON DELETE CASCADE on card_group_member).
     pub fn delete_group(&mut self, id: i64) -> rusqlite::Result<usize> {
-        self.conn.execute("DELETE FROM card_group WHERE id = ?1", params![id])
+        self.conn
+            .execute("DELETE FROM card_group WHERE id = ?1", params![id])
     }
 
     /// Add a clipboard record to a group.  Idempotent: re-adding an existing
@@ -779,11 +783,7 @@ impl Store {
     }
 
     /// Remove a clipboard record from a group.
-    pub fn remove_group_member(
-        &mut self,
-        group_id: i64,
-        sequence: u32,
-    ) -> rusqlite::Result<usize> {
+    pub fn remove_group_member(&mut self, group_id: i64, sequence: u32) -> rusqlite::Result<usize> {
         self.conn.execute(
             "DELETE FROM card_group_member WHERE group_id = ?1 AND sequence = ?2",
             params![group_id, sequence as i64],
@@ -804,6 +804,27 @@ impl Store {
             v.push(r?);
         }
         Ok(v)
+    }
+
+    /// Read one setting without creating, migrating or write-locking the database.
+    ///
+    /// Used at startup to pick the colour theme before the worker thread has opened the
+    /// store, so a light theme does not flash dark first. Any failure (missing file, missing
+    /// table, unreadable value) yields `None`.
+    pub fn read_setting_readonly(path: impl AsRef<Path>, key: &str) -> Option<String> {
+        let conn = Connection::open_with_flags(
+            path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .ok()?;
+        conn.query_row(
+            "SELECT value FROM app_settings WHERE key = ?1",
+            params![key],
+            |r| r.get(0),
+        )
+        .optional()
+        .ok()
+        .flatten()
     }
 
     pub fn upsert_application(
@@ -1420,6 +1441,111 @@ mod tests {
         assert_eq!(store.set_pinned(&[1, 2], false).unwrap(), 2);
         assert_eq!(store.purge_older_than(2_000).unwrap(), 2);
         assert!(store.load_all().unwrap().is_empty());
+    }
+
+    #[test]
+    fn readonly_setting_reader_reports_missing_and_stored_values() {
+        let dir = std::env::temp_dir().join(format!("veya-setting-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("veya.db");
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(Store::read_setting_readonly(&path, "theme"), None);
+        {
+            let mut store = Store::open(&path).unwrap();
+            store.set_setting("theme", "light").unwrap();
+        }
+        assert_eq!(
+            Store::read_setting_readonly(&path, "theme").as_deref(),
+            Some("light")
+        );
+        assert_eq!(Store::read_setting_readonly(&path, "other"), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn trim_to_max_count_keeps_the_newest_records() {
+        let mut store = Store::open_in_memory().unwrap();
+        for sequence in 1..=5 {
+            store.insert_record(&rec(sequence)).unwrap();
+        }
+        assert_eq!(store.trim_to_max_count(3).unwrap(), 2);
+        let kept: Vec<u32> = store
+            .load_all()
+            .unwrap()
+            .iter()
+            .map(|record| record.sequence)
+            .collect();
+        assert_eq!(kept, vec![3, 4, 5]);
+        assert_eq!(store.trim_to_max_count(3).unwrap(), 0);
+        assert_eq!(store.trim_to_max_count(10).unwrap(), 0);
+    }
+
+    #[test]
+    fn trim_to_max_count_orders_by_time_not_sequence() {
+        // Clipboard sequence numbers restart after a reboot, so a record with a
+        // small sequence can be the newest one.
+        let mut store = Store::open_in_memory().unwrap();
+        let mut old = rec(900);
+        old.created_at_ms = 1_000;
+        let mut new = rec(2);
+        new.created_at_ms = 9_000;
+        store.insert_record(&old).unwrap();
+        store.insert_record(&new).unwrap();
+        assert_eq!(store.trim_to_max_count(1).unwrap(), 1);
+        let kept: Vec<u32> = store
+            .load_all()
+            .unwrap()
+            .iter()
+            .map(|record| record.sequence)
+            .collect();
+        assert_eq!(kept, vec![2]);
+    }
+
+    #[test]
+    fn trim_to_max_count_skips_pinned_and_grouped_records() {
+        let mut store = Store::open_in_memory().unwrap();
+        for sequence in 1..=6 {
+            store.insert_record(&rec(sequence)).unwrap();
+        }
+        store.set_pinned(&[1], true).unwrap();
+        let group = store.create_group("keep", 1).unwrap();
+        store.add_group_member(group, 2, 1).unwrap();
+        // 4 unpinned, ungrouped records (3..=6); keep the newest 2 of them.
+        assert_eq!(store.trim_to_max_count(2).unwrap(), 2);
+        let kept: Vec<u32> = store
+            .load_all()
+            .unwrap()
+            .iter()
+            .map(|record| record.sequence)
+            .collect();
+        assert_eq!(kept, vec![1, 2, 5, 6]);
+        assert_eq!(store.trim_to_max_count(0).unwrap(), 2);
+        let kept: Vec<u32> = store
+            .load_all()
+            .unwrap()
+            .iter()
+            .map(|record| record.sequence)
+            .collect();
+        assert_eq!(kept, vec![1, 2]);
+    }
+
+    #[test]
+    fn expiry_purge_skips_pinned_and_grouped_records() {
+        let mut store = Store::open_in_memory().unwrap();
+        for sequence in 1..=4 {
+            store.insert_record(&rec(sequence)).unwrap();
+        }
+        store.set_pinned(&[1], true).unwrap();
+        let group = store.create_group("keep", 1).unwrap();
+        store.add_group_member(group, 2, 1).unwrap();
+        assert_eq!(store.purge_older_than(i64::MAX).unwrap(), 2);
+        let kept: Vec<u32> = store
+            .load_all()
+            .unwrap()
+            .iter()
+            .map(|record| record.sequence)
+            .collect();
+        assert_eq!(kept, vec![1, 2]);
     }
 
     #[test]

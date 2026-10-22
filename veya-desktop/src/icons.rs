@@ -325,7 +325,7 @@ where
     .center_y(Length::Fixed(size))
     .style(move |_t: &iced::Theme| container::Style {
         background: Some(theme::bg(bgc)),
-        text_color: Some(theme::INK()),
+        text_color: Some(theme::ON_ACCENT()),
         border: Border {
             color: Color::from_rgba(1.0, 1.0, 1.0, 0.15),
             width: 1.0,

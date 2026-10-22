@@ -14,7 +14,11 @@ impl App {
         let mut tabs = row![].spacing(6);
         for f in filters {
             let selected = self.filter == f;
-            let icon_color = if selected { theme::INK() } else { theme::MUTED() };
+            let icon_color = if selected {
+                theme::ON_ACCENT()
+            } else {
+                theme::MUTED()
+            };
             let tab = button(
                 row![
                     icons::icon(f.icon(), icon_color, 13.0),
@@ -29,7 +33,7 @@ impl App {
         }
 
         let pin_color = if self.pinned_only {
-            theme::INK()
+            theme::ON_ACCENT()
         } else {
             theme::MUTED()
         };
@@ -65,7 +69,11 @@ impl App {
         let compact = self.list_density == ListDensity::Compact;
         let density_button = button(icons::icon(
             Icon::List,
-            if compact { theme::INK() } else { theme::MUTED() },
+            if compact {
+                theme::ON_ACCENT()
+            } else {
+                theme::MUTED()
+            },
             15.0,
         ))
         .on_press(Message::ToggleListDensity)
@@ -95,7 +103,7 @@ impl App {
     pub(super) fn history_column(&self) -> Element<'_, Message> {
         let filtered = self.filtered_cards();
         let content: Element<'_, Message> = if filtered.is_empty() {
-            let (icon, title, sub) = if self.history_query_pending() {
+            let (icon, title, sub) = if self.history_list_pending() {
                 (Icon::History, "正在加载历史记录", "正在读取当前筛选结果…")
             } else if !self.search.trim().is_empty() {
                 (
@@ -180,9 +188,7 @@ impl App {
                 ))
                 .style(theme::scroll_style)
                 .height(Length::Fill)
-                .on_scroll(|viewport: scrollable::Viewport| {
-                    Message::HistoryScrolled(viewport)
-                })
+                .on_scroll(|viewport: scrollable::Viewport| Message::HistoryScrolled(viewport))
                 .into()
         };
 
@@ -197,7 +203,7 @@ impl App {
         // The worker owns filtering, sorting, and paging. The UI only receives
         // the bounded page, so never rebuild a second full history projection
         // here.
-        if self.history_query_pending() {
+        if self.history_list_pending() {
             Vec::new()
         } else {
             self.state.cards.iter().collect()

@@ -1,10 +1,13 @@
 //! The hotkey picker reuses bounded worker history and typed clipboard replay.
+use super::history::card_menu_origin;
 use super::*;
 use iced::widget::column;
 
 const QUICK_WIDTH: f32 = 440.0;
 const QUICK_HEIGHT: f32 = 580.0;
 const ROW_HEIGHT: f32 = 64.0;
+/// Rows from the end of the loaded list at which keyboard navigation loads the next page.
+const LOAD_MORE_LOOKAHEAD: usize = 5;
 
 pub(super) struct QuickPanel {
     target: Option<PasteTarget>,
@@ -245,7 +248,7 @@ impl App {
     }
 
     pub(super) fn quick_paste(&mut self, sequence: u32) -> Task<Message> {
-        if self.history_query_pending()
+        if self.history_list_pending()
             || !self
                 .state
                 .cards
@@ -355,7 +358,7 @@ impl App {
     }
 
     pub(super) fn quick_move(&mut self, delta: i32) -> Task<Message> {
-        if self.quick.as_ref().is_none_or(|quick| quick.busy()) || self.history_query_pending() {
+        if self.quick.as_ref().is_none_or(|quick| quick.busy()) || self.history_list_pending() {
             return Task::none();
         }
         let sequences: Vec<u32> = self.state.cards.iter().map(|card| card.sequence).collect();
@@ -363,6 +366,11 @@ impl App {
             return Task::none();
         };
         self.select_history_card(sequences[index]);
+        // Arrow keys reach the end of the loaded rows without any scroll event, so ask for
+        // the next page once the selection gets close to the end.
+        if index + LOAD_MORE_LOOKAHEAD >= sequences.len() {
+            self.request_history_load_more();
+        }
         // Each row has a fixed height; keep the keyboard selection in view.
         let viewport = (self.window_size.height - 170.0).max(ROW_HEIGHT);
         let content = sequences.len() as f32 * ROW_HEIGHT;
@@ -383,7 +391,7 @@ impl App {
             return Space::new(0, 0).into();
         };
         let busy = quick.busy();
-        let pending = self.history_query_pending();
+        let pending = self.history_list_pending();
         let header = row![
             mouse_area(
                 row![
@@ -493,7 +501,7 @@ impl App {
                     .style(theme::card_button(
                         self.state.selected == Some(card.sequence),
                     ));
-                let row = if busy {
+                let row: Element<'_, Message> = if busy {
                     mouse_area(row).into()
                 } else {
                     mouse_area(row.on_press(Message::QuickPaste(card.sequence)))
@@ -506,9 +514,7 @@ impl App {
                 .id(quick_scroll_id())
                 .height(Length::Fill)
                 .style(theme::scroll_style)
-                .on_scroll(|viewport: scrollable::Viewport| {
-                    Message::QuickScrolled(viewport)
-                })
+                .on_scroll(|viewport: scrollable::Viewport| Message::QuickScrolled(viewport))
                 .into()
         };
         let footer = row![
@@ -517,8 +523,15 @@ impl App {
         ]
         .spacing(4)
         .align_y(Alignment::Center);
-        let mut layout = column![header, search, group_tabs, theme::hdivider(), list, theme::hdivider()]
-            .spacing(9);
+        let mut layout = column![
+            header,
+            search,
+            group_tabs,
+            theme::hdivider(),
+            list,
+            theme::hdivider()
+        ]
+        .spacing(9);
         if let Some(error) = &quick.error {
             layout = layout.push(meta(error.clone()).size(12).color(theme::WARN()));
         } else if busy {
@@ -558,8 +571,7 @@ impl App {
                 .padding(pad(4.0, 10.0, 4.0, 10.0))
                 .style(theme::chip_button(selected))
                 .on_press(Message::QuickSelectGroup(Some(group.id)));
-            let label = mouse_area(label)
-                .on_right_press(Message::QuickStartRenameGroup(group.id));
+            let label = mouse_area(label).on_right_press(Message::QuickStartRenameGroup(group.id));
             tabs.push(label.into());
         }
         let add = button(
@@ -587,17 +599,10 @@ impl App {
 
     /// Right-click context menu for a card inside the quick picker.
     /// Lists every existing group (toggle add/remove) plus a "新建分组" entry.
-    fn quick_card_menu(
-        &self,
-        card: &CardView,
-        position: iced::Point,
-    ) -> Element<'_, Message> {
+    fn quick_card_menu(&self, card: &CardView, position: iced::Point) -> Element<'_, Message> {
         let mut items: Vec<Element<'_, Message>> = Vec::new();
         for group in self.state.groups.iter() {
-            let label = format!(
-                "添加到「{}」",
-                group.name
-            );
+            let label = format!("添加到「{}」", group.name);
             let item = button(
                 row![
                     icons::icon(Icon::Pin, theme::MUTED(), 14.0),
@@ -648,8 +653,8 @@ impl App {
                 right: 0.0,
                 bottom: 0.0,
             });
-        let dismiss =
-            mouse_area(Space::new(Length::Fill, Length::Fill)).on_press(Message::QuickCloseCardMenu);
+        let dismiss = mouse_area(Space::new(Length::Fill, Length::Fill))
+            .on_press(Message::QuickCloseCardMenu);
         stack([dismiss.into(), positioned.into()]).into()
     }
 }
@@ -746,8 +751,13 @@ mod tests {
             history_active: true,
             list_density: ListDensity::Detailed,
             exclude_input: String::new(),
+            max_items_input: String::new(),
+            expiry_days_input: String::new(),
+            limit_inputs_synced: true,
             detail_menu_open: false,
             card_menu: None,
+            quick_group_sel: None,
+            quick_group_input: None,
             cursor_position: iced::Point::ORIGIN,
             window_size: iced::Size::new(1080.0, 700.0),
             content_modal_for: None,
@@ -793,6 +803,105 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         app.worker.cmd_tx = tx;
         (app, rx)
+    }
+
+    #[test]
+    fn scrolling_to_the_end_requests_exactly_one_next_page() {
+        let (mut app, rx) = ready_text_app();
+        app.state.history_has_next = true;
+        app.request_history_load_more();
+        match rx.try_recv() {
+            Ok(WorkerCmd::QueryHistory(query)) => assert_eq!(query.page, 1),
+            _ => panic!("expected a query for the next page"),
+        }
+        // The next page is already on its way, so further scroll events do nothing.
+        app.request_history_load_more();
+        assert!(rx.try_recv().is_err());
+        assert_eq!(app.history_page, 1);
+    }
+
+    #[test]
+    fn no_next_page_is_requested_after_the_last_one() {
+        let (mut app, rx) = ready_text_app();
+        app.state.history_has_next = false;
+        app.request_history_load_more();
+        assert!(rx.try_recv().is_err());
+        assert_eq!(app.history_page, 0);
+    }
+
+    #[test]
+    fn loading_the_next_page_keeps_the_rows_on_screen() {
+        let (mut app, _rx) = ready_text_app();
+        app.history_active = true;
+        assert!(!app.history_list_pending());
+
+        // Next page requested but not yet reported by the worker: rows stay visible.
+        app.history_page = 1;
+        assert!(!app.history_list_pending());
+
+        // Worker is appending: rows stay visible, yet further loads stay blocked.
+        app.state.history_query = app.history_query();
+        app.state.history_loading = true;
+        app.state.history_appending = true;
+        assert!(!app.history_list_pending());
+        assert!(app.history_query_pending());
+
+        // A full reload does replace the list.
+        app.state.history_appending = false;
+        assert!(app.history_list_pending());
+
+        // So does changing the filter.
+        app.state.history_loading = false;
+        app.filter = Filter::Image;
+        assert!(app.history_list_pending());
+    }
+
+    #[test]
+    fn typing_in_a_limit_box_never_changes_the_saved_limit() {
+        let (mut app, rx) = ready_text_app();
+        let _ = app.update(Message::MaxItemsInput("5".into()));
+        let _ = app.update(Message::MaxItemsInput("".into()));
+        let _ = app.update(Message::ExpiryDaysInput("1".into()));
+        assert!(rx.try_recv().is_err(), "typing must not reach the worker");
+        assert_eq!(
+            app.state.max_items,
+            crate::capture::MaxItemsConfig::default()
+        );
+
+        // Letters and symbols are dropped from the draft.
+        let _ = app.update(Message::MaxItemsInput("12ab3-".into()));
+        assert_eq!(app.max_items_input, "123");
+    }
+
+    #[test]
+    fn applying_a_limit_validates_the_draft_before_sending_it() {
+        let (mut app, rx) = ready_text_app();
+        app.state.max_items.enabled = true;
+
+        let _ = app.update(Message::MaxItemsInput("0".into()));
+        let _ = app.update(Message::ApplyMaxItems);
+        assert!(rx.try_recv().is_err(), "an out-of-range value is rejected");
+        assert_eq!(
+            app.max_items_input, "1000",
+            "the box returns to the saved value"
+        );
+
+        let _ = app.update(Message::MaxItemsInput("250".into()));
+        let _ = app.update(Message::ApplyMaxItems);
+        match rx.try_recv() {
+            Ok(WorkerCmd::SetMaxItems(cfg)) => {
+                assert!(cfg.enabled);
+                assert_eq!(cfg.count, 250);
+            }
+            _ => panic!("expected the applied limit"),
+        }
+
+        let _ = app.update(Message::ExpiryDaysInput("30".into()));
+        let _ = app.update(Message::ApplyExpiryDays);
+        match rx.try_recv() {
+            Ok(WorkerCmd::SetExpiry(cfg)) => assert_eq!(cfg.days, 30),
+            _ => panic!("expected the applied expiry"),
+        }
     }
 
     #[test]

@@ -37,3 +37,4 @@ Desktop.ini
 # Local env
 .env
 .env.*
+"ci-logs.zip"  
