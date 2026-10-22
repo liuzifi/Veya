@@ -22,6 +22,12 @@ jobs:
           rustup default 1.99.0-x86_64-pc-windows-msvc
           rustfmt --version
 
+      - name: Install nightly toolchain (Win7 target)
+        run: |
+          rustup toolchain install nightly-x86_64-pc-windows-msvc --profile minimal
+          rustup target add x86_64-win7-windows-msvc --toolchain nightly
+          cargo +nightly --version
+
       - name: Check formatting
         continue-on-error: true
         run: cargo fmt --all -- --check
@@ -40,10 +46,10 @@ jobs:
         shell: pwsh
         run: choco install nsis -y --no-progress
 
-      - name: Build release installer
+      - name: Build Win7-compatible installer
         shell: pwsh
         run: |
-          ./scripts/build-installer.ps1 -Nsis 'C:\Program Files (x86)\NSIS\makensis.exe'
+          ./scripts/build-installer.ps1 -Win7 -Nsis 'C:\Program Files (x86)\NSIS\makensis.exe'
 
       - name: Upload installer artifact
         uses: actions/upload-artifact@v4
@@ -81,6 +87,8 @@ jobs:
             ## Veya ${{ steps.version.outputs.version }}
 
             Download the installer below (`veya-setup.exe`) and run it to install Veya.
+
+            This is a Windows 7 SP1 compatible build (static CRT, x86_64-win7-windows-msvc).
 
             See the [release notes](https://github.com/liuzifi/Veya/blob/main/docs/releases/v${{ steps.version.outputs.version }}.md) for details.
           generate_release_notes: true
