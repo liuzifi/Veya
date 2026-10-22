@@ -113,8 +113,8 @@ impl CardView {
 /// UI theme mode (dark / light).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ThemeMode {
-    #[default]
     Dark,
+    #[default]
     Light,
 }
 
@@ -135,8 +135,8 @@ impl ThemeMode {
 
     pub fn from_key(s: &str) -> Self {
         match s {
-            "light" => ThemeMode::Light,
-            _ => ThemeMode::Dark,
+            "dark" => ThemeMode::Dark,
+            _ => ThemeMode::Light,
         }
     }
 }

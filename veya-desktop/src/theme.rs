@@ -81,7 +81,7 @@ pub static LIGHT: Palette = Palette {
 };
 
 thread_local! {
-    static ACTIVE: Cell<&'static Palette> = Cell::new(&DARK);
+    static ACTIVE: Cell<&'static Palette> = Cell::new(&LIGHT);
 }
 
 /// Resolve the active palette (dark or light) at runtime.
