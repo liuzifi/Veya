@@ -15,6 +15,23 @@ if ($Win7) {
     # Tier 3 target: no prebuilt std, so build it with nightly. A static CRT avoids requiring the
     # UCRT update / VC++ redistributable on the target machine.
     $win7Target = 'x86_64-win7-windows-msvc'
+
+    # -Zbuild-std compiles the standard library from source, which needs the rust-src component
+    # of the nightly toolchain. Add it when missing and fail with a clear message otherwise.
+    function Get-NightlyStdLock {
+        $sysroot = (& rustc +nightly --print sysroot).Trim()
+        Join-Path $sysroot 'lib\rustlib\src\rust\library\Cargo.lock'
+    }
+    if (-not (Test-Path -LiteralPath (Get-NightlyStdLock))) {
+        Write-Host 'rust-src is missing from the nightly toolchain; installing it.'
+        & rustup component add rust-src --toolchain nightly
+        if ($LASTEXITCODE -ne 0) { throw "rustup component add rust-src failed: $LASTEXITCODE" }
+    }
+    if (-not (Test-Path -LiteralPath (Get-NightlyStdLock))) {
+        & rustc +nightly --version --verbose
+        & rustup component list --installed --toolchain nightly
+        throw "rust-src is still missing from the nightly toolchain: $(Get-NightlyStdLock)"
+    }
     $previousRustflags = $env:RUSTFLAGS
     $env:RUSTFLAGS = (($previousRustflags, '-C target-feature=+crt-static') | Where-Object { $_ }) -join ' '
     try {

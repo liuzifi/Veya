@@ -23,10 +23,15 @@ jobs:
           rustfmt --version
 
       - name: Install nightly toolchain (Win7 target)
+        shell: pwsh
         run: |
-          rustup toolchain install nightly-x86_64-pc-windows-msvc --profile minimal
-          rustup target add x86_64-win7-windows-msvc --toolchain nightly
-          cargo +nightly --version
+          rustup toolchain install nightly-x86_64-pc-windows-msvc --profile minimal --component rust-src --allow-downgrade
+          if ($LASTEXITCODE -ne 0) { throw "nightly toolchain install failed: $LASTEXITCODE" }
+          # Make sure rust-src is present even if the toolchain already existed without it.
+          rustup component add rust-src --toolchain nightly-x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { throw "rust-src install failed: $LASTEXITCODE" }
+          rustc +nightly --version
+          rustup component list --installed --toolchain nightly-x86_64-pc-windows-msvc
 
       - name: Check formatting
         continue-on-error: true
