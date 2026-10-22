@@ -303,7 +303,9 @@ fn run_tray(ready: &Sender<Result<(), String>>) -> Result<(), String> {
         match msg {
             WM_TRAY => {
                 let mouse = (lparam.0 as u32) & 0xFFFF;
-                if mouse == WM_RBUTTONUP || mouse == WM_LBUTTONUP {
+                if mouse == WM_LBUTTONUP {
+                    send(TrayEvent::OpenWindow);
+                } else if mouse == WM_RBUTTONUP {
                     show_menu(hwnd);
                 }
                 LRESULT(0)
