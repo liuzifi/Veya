@@ -711,8 +711,10 @@ impl App {
                     .width(Length::Fill)
                     .height(ROW_HEIGHT)
                     .padding(8)
-                    .style(theme::card_button(
+                    .style(theme::card_button_quick(
                         self.state.selected == Some(card.sequence),
+                        index % 2 == 1,
+                        card.has_paste_activity,
                     ));
                 let row: Element<'_, Message> = if busy {
                     mouse_area(row).into()

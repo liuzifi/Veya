@@ -418,6 +418,97 @@ pub fn card_button(selected: bool) -> impl Fn(&Theme, button::Status) -> button:
     }
 }
 
+/// Quick-panel card button: like [`card_button`] but also supports an
+/// alternating row tint (`alt`) and a left-edge red marker for items that
+/// have been pasted (`used`).
+///
+/// - `alt = true` applies a very subtle surface tint so adjacent rows are
+///   visually distinguishable even without hover.
+/// - `used = true` draws a 3 px red left border to signal "already pasted".
+pub fn card_button_quick(
+    selected: bool,
+    alt: bool,
+    used: bool,
+) -> impl Fn(&Theme, button::Status) -> button::Style + 'static {
+    move |_t: &Theme, status: button::Status| {
+        let p = palette();
+
+        let (bg_start, bg_end, border_c, border_w) = if selected {
+            (
+                Color::from_rgb(
+                    (p.accent_soft.r + p.surface.r) / 2.0,
+                    (p.accent_soft.g + p.surface.g) / 2.0,
+                    (p.accent_soft.b + p.surface.b) / 2.0,
+                ),
+                p.accent_soft,
+                p.accent_border,
+                1.5,
+            )
+        } else {
+            match status {
+                button::Status::Hovered => (
+                    Color::from_rgb(
+                        (p.elevated.r + p.surface.r) / 2.0,
+                        (p.elevated.g + p.surface.g) / 2.0,
+                        (p.elevated.b + p.surface.b) / 2.0,
+                    ),
+                    p.elevated,
+                    Color::from_rgba(p.border.r, p.border.g, p.border.b, 0.3),
+                    1.0,
+                ),
+                _ => {
+                    // Non-hovered, non-selected: apply alternating tint.
+                    if alt {
+                        (
+                            Color::from_rgba(
+                                p.surface.r,
+                                p.surface.g,
+                                p.surface.b,
+                                0.45,
+                            ),
+                            Color::from_rgba(
+                                p.surface.r,
+                                p.surface.g,
+                                p.surface.b,
+                                0.20,
+                            ),
+                            Color::TRANSPARENT,
+                            0.0,
+                        )
+                    } else {
+                        (
+                            Color::TRANSPARENT,
+                            Color::TRANSPARENT,
+                            Color::TRANSPARENT,
+                            0.0,
+                        )
+                    }
+                }
+            }
+        };
+
+        // If the item was already pasted, draw a red left border.
+        let (border_c, border_w) = if used && !selected {
+            (p.danger, 3.0)
+        } else {
+            (border_c, border_w)
+        };
+
+        button::Style {
+            background: Some(
+                if selected || matches!(status, button::Status::Hovered) || alt {
+                    gradient(bg_start, bg_end)
+                } else {
+                    bg(Color::TRANSPARENT)
+                },
+            ),
+            text_color: INK(),
+            border: stroke(border_c, border_w, 10.0),
+            ..Default::default()
+        }
+    }
+}
+
 #[allow(dead_code)]
 pub fn ghost_button(_t: &Theme, status: button::Status) -> button::Style {
     let (bg_c, border_c, text_c) = match status {
