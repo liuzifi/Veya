@@ -26,7 +26,7 @@ Veya 用 **Rust + Iced** 构建，剪贴板内容和历史记录存入本机 SQL
 
 ## 下载与安装
 
-适用于 **Windows 10 / 11 x64**。从 [GitHub Releases](https://github.com/NGLSL/Veya/releases) 下载 `veya-setup.exe`；若发布页提供 `veya-setup.exe.sha256`，请核对安装包摘要。
+适用于 **Windows 10 / 11 x64** 和 **Windows 7 SP1 x64**。从 [GitHub Releases](https://github.com/NGLSL/Veya/releases) 下载标准版 `veya-setup.exe` 或 Win7 兼容版 `veya-win7-setup.exe`；若发布页提供 `.sha256` 文件，请核对安装包摘要。
 
 本 README 描述当前源码；已发布安装包的功能请以对应版本的发布说明为准。
 
