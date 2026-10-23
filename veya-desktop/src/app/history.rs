@@ -385,7 +385,11 @@ impl App {
         )
         .on_press(Message::CloseCardMenu)
         .on_right_press(Message::CloseCardMenu);
-        let origin = card_menu_origin(position, self.window_size);
+        let origin = card_menu_origin(
+            position,
+            self.window_size,
+            iced::Size::new(170.0, MANAGER_CARD_MENU_HEIGHT),
+        );
         let positioned = container(menu)
             .width(Length::Fill)
             .height(Length::Fill)
@@ -403,11 +407,17 @@ impl App {
     }
 }
 
-pub(super) fn card_menu_origin(cursor: iced::Point, window: iced::Size) -> iced::Point {
-    const MENU_WIDTH: f32 = 170.0;
-    const MENU_HEIGHT: f32 = 82.0;
-    let max_x = (window.width - MENU_WIDTH - 8.0).max(0.0);
-    let max_y = (window.height - MENU_HEIGHT - 8.0).max(0.0);
+/// Height of the manager's two-item card menu.
+const MANAGER_CARD_MENU_HEIGHT: f32 = 82.0;
+
+/// Top-left corner for a card menu opened at `cursor`, kept inside the window.
+pub(super) fn card_menu_origin(
+    cursor: iced::Point,
+    window: iced::Size,
+    menu: iced::Size,
+) -> iced::Point {
+    let max_x = (window.width - menu.width - 8.0).max(0.0);
+    let max_y = (window.height - menu.height - 8.0).max(0.0);
     iced::Point::new(cursor.x.clamp(0.0, max_x), cursor.y.clamp(0.0, max_y))
 }
 

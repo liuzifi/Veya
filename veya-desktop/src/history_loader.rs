@@ -410,7 +410,13 @@ pub(super) fn load_page(
     };
     let mut consume = |summary: HistorySummary| {
         if let Some(members) = &group_members {
-            if !members.contains(&i64::from(summary.representative.sequence)) {
+            // A card stands for consecutive identical copies, and the group may hold any
+            // of them (the newest copy only becomes the representative later).
+            if !summary
+                .raw_sequences
+                .iter()
+                .any(|sequence| members.contains(&i64::from(*sequence)))
+            {
                 return false;
             }
         }

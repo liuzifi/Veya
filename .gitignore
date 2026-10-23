@@ -37,4 +37,7 @@ Desktop.ini
 # Local env
 .env
 .env.*
-"ci-logs.zip"  
+
+# Local patch files and CI logs
+*.patch
+ci-logs.zip

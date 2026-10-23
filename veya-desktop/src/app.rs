@@ -298,8 +298,13 @@ struct QuickGroupInput {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum QuickGroupInputMode {
-    Create,
-    Rename { id: i64 },
+    /// `add_sequence` is the card whose menu started the creation; it joins the new group.
+    Create {
+        add_sequence: Option<u32>,
+    },
+    Rename {
+        id: i64,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -307,7 +312,9 @@ pub enum Message {
     QuickMove(i32),
     QuickPaste(u32),
     QuickSelectGroup(Option<i64>),
-    QuickStartCreateGroup,
+    QuickStartCreateGroup {
+        add_sequence: Option<u32>,
+    },
     QuickStartRenameGroup(i64),
     QuickGroupInputChanged(String),
     QuickGroupInputSubmit,
@@ -708,7 +715,8 @@ impl App {
         let message = if self.quick_group_input.is_some() {
             match message {
                 Message::RecopySelected => Message::QuickGroupInputSubmit,
-                Message::QuickDismiss { .. } => Message::QuickGroupInputCancel,
+                // Escape only closes the name box; losing focus still dismisses the picker.
+                Message::QuickDismiss { restore: true } => Message::QuickGroupInputCancel,
                 Message::QuickMove(_) | Message::QuickPasteNth(_) => Message::QuickCloseCardMenu,
                 other => other,
             }
@@ -754,11 +762,14 @@ impl App {
             Message::QuickUnfocused => self.quick_unfocused(),
             Message::QuickSelectGroup(group_id) => {
                 self.quick_group_sel = group_id;
+                self.quick_group_input = None;
+                self.set_quick_error(None);
                 self.request_history_query(true)
             }
-            Message::QuickStartCreateGroup => {
+            Message::QuickStartCreateGroup { add_sequence } => {
+                self.set_quick_error(None);
                 self.quick_group_input = Some(QuickGroupInput {
-                    mode: QuickGroupInputMode::Create,
+                    mode: QuickGroupInputMode::Create { add_sequence },
                     value: String::new(),
                 });
                 Task::none()
@@ -771,6 +782,7 @@ impl App {
                     .find(|g| g.id == id)
                     .map(|g| g.name.clone())
                     .unwrap_or_default();
+                self.set_quick_error(None);
                 self.quick_group_input = Some(QuickGroupInput {
                     mode: QuickGroupInputMode::Rename { id },
                     value,
@@ -781,33 +793,44 @@ impl App {
                 if let Some(input) = self.quick_group_input.as_mut() {
                     input.value = value;
                 }
+                self.set_quick_error(None);
                 Task::none()
             }
             Message::QuickGroupInputSubmit => {
-                if let Some(input) = self.quick_group_input.take() {
-                    let name = input.value.trim().to_owned();
-                    if name.is_empty() {
-                        self.state.status_note = "分组名称不能为空".into();
-                    } else {
-                        match input.mode {
-                            QuickGroupInputMode::Create => {
-                                let _ = self.worker.cmd_tx.send(WorkerCmd::CreateGroup { name });
-                            }
-                            QuickGroupInputMode::Rename { id } => {
-                                let _ =
-                                    self.worker.cmd_tx.send(WorkerCmd::RenameGroup { id, name });
-                            }
-                        }
+                let Some(input) = self.quick_group_input.clone() else {
+                    return Task::none();
+                };
+                let name = input.value.trim().to_owned();
+                if let Some(problem) = self.group_name_problem(&name, input.mode) {
+                    // Keep the box open so the name can be corrected.
+                    self.set_quick_error(Some(problem));
+                    return Task::none();
+                }
+                self.quick_group_input = None;
+                self.set_quick_error(None);
+                match input.mode {
+                    QuickGroupInputMode::Create { add_sequence } => {
+                        let _ = self
+                            .worker
+                            .cmd_tx
+                            .send(WorkerCmd::CreateGroup { name, add_sequence });
+                    }
+                    QuickGroupInputMode::Rename { id } => {
+                        let _ = self.worker.cmd_tx.send(WorkerCmd::RenameGroup { id, name });
                     }
                 }
                 Task::none()
             }
             Message::QuickGroupInputCancel => {
                 self.quick_group_input = None;
+                self.set_quick_error(None);
                 Task::none()
             }
             Message::QuickDeleteGroup(id) => {
                 let _ = self.worker.cmd_tx.send(WorkerCmd::DeleteGroup { id });
+                // The rename box belongs to the group that is going away.
+                self.quick_group_input = None;
+                self.set_quick_error(None);
                 if self.quick_group_sel == Some(id) {
                     self.quick_group_sel = None;
                     return self.request_history_query(true);
@@ -831,10 +854,19 @@ impl App {
                 Task::none()
             }
             Message::QuickRemoveFromGroup { group_id, sequence } => {
-                let _ = self
-                    .worker
-                    .cmd_tx
-                    .send(WorkerCmd::RemoveFromGroup { group_id, sequence });
+                // A card can stand for several identical copies; the group may hold any of
+                // them, so remove all of the card's records from the group.
+                let sequences = self
+                    .state
+                    .cards
+                    .iter()
+                    .find(|card| card.sequence == sequence)
+                    .map(|card| card.raw_sequences.clone())
+                    .unwrap_or_else(|| vec![sequence]);
+                let _ = self.worker.cmd_tx.send(WorkerCmd::RemoveFromGroup {
+                    group_id,
+                    sequences,
+                });
                 self.card_menu = None;
                 Task::none()
             }

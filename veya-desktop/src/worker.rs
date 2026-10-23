@@ -36,11 +36,15 @@ pub enum WorkerCmd {
     SetThemeMode(ThemeMode),
     SetMaxItems(MaxItemsConfig),
     SetExpiry(ExpiryConfig),
-    CreateGroup { name: String },
+    CreateGroup {
+        name: String,
+        /// Record to put into the new group right away (from a card's context menu).
+        add_sequence: Option<u32>,
+    },
     RenameGroup { id: i64, name: String },
     DeleteGroup { id: i64 },
     AddToGroup { group_id: i64, sequence: u32 },
-    RemoveFromGroup { group_id: i64, sequence: u32 },
+    RemoveFromGroup { group_id: i64, sequences: Vec<u32> },
     ExcludeApp { exe: String },
     UnexcludeApp { exe: String },
     DeleteRecord { sequences: Vec<u32> },
@@ -980,13 +984,21 @@ fn run_worker(
                             removed,
                         );
                     }
-                    WorkerCmd::CreateGroup { name } => {
+                    WorkerCmd::CreateGroup { name, add_sequence } => {
                         let name = name.trim();
                         if name.is_empty() {
                             status_note = "分组名称不能为空".into();
                         } else {
                             status_note = match store.create_group(name, now_ms()) {
-                                Ok(_) => format!("已创建分组「{name}」"),
+                                Ok(group_id) => {
+                                    if let Some(sequence) = add_sequence {
+                                        let _ =
+                                            store.add_group_member(group_id, sequence, now_ms());
+                                        format!("已创建分组「{name}」并加入当前记录")
+                                    } else {
+                                        format!("已创建分组「{name}」")
+                                    }
+                                }
                                 Err(error) => {
                                     if error.to_string().contains("UNIQUE") {
                                         "分组名称已存在".into()
@@ -1036,8 +1048,16 @@ fn run_worker(
                             Err(error) => format!("加入分组失败：{error}"),
                         };
                     }
-                    WorkerCmd::RemoveFromGroup { group_id, sequence } => {
-                        status_note = match store.remove_group_member(group_id, sequence) {
+                    WorkerCmd::RemoveFromGroup {
+                        group_id,
+                        sequences,
+                    } => {
+                        let removed = sequences.iter().try_fold(0usize, |total, &sequence| {
+                            store
+                                .remove_group_member(group_id, sequence)
+                                .map(|count| total + count)
+                        });
+                        status_note = match removed {
                             Ok(_) => {
                                 if history_query.group_id == Some(group_id) {
                                     history_page.invalidate();
@@ -1305,6 +1325,42 @@ mod tests {
             through[HISTORY_PAGE_SIZE].sequence, single[0].sequence,
             "page 1 must follow page 0 without a gap or repeat"
         );
+    }
+
+    #[test]
+    fn group_view_keeps_a_card_whose_newest_copy_is_not_the_saved_one() {
+        let mut store = Store::open_in_memory().unwrap();
+        store.insert_record(&text_record(1, "same", 1_000)).unwrap();
+        store
+            .insert_record(&text_record(2, "other", 2_000))
+            .unwrap();
+        // The user groups the first "same", then copies the identical text again right
+        // after it; the newest copy (3) becomes the card's representative.
+        store.insert_record(&text_record(3, "same", 3_000)).unwrap();
+        store.insert_record(&text_record(4, "same", 4_000)).unwrap();
+        let group = store.create_group("keep", 1).unwrap();
+        store.add_group_member(group, 3, 1).unwrap();
+        let query = HistoryQuery {
+            group_id: Some(group),
+            ..HistoryQuery::default()
+        };
+        let (cards, _) = history_loader::load_page(&store, &query, false, &|| true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(cards.len(), 1);
+        let mut raw = cards[0].raw_sequences.clone();
+        raw.sort_unstable();
+        assert_eq!(raw, vec![3, 4]);
+        // Another group sees nothing.
+        let empty = store.create_group("empty", 2).unwrap();
+        let query = HistoryQuery {
+            group_id: Some(empty),
+            ..HistoryQuery::default()
+        };
+        let (cards, _) = history_loader::load_page(&store, &query, false, &|| true)
+            .unwrap()
+            .unwrap();
+        assert!(cards.is_empty());
     }
 
     pub(super) fn text_record(sequence: u32, text: &str, created_at_ms: i64) -> ClipboardRecord {
