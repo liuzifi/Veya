@@ -272,7 +272,11 @@ where
         background: Some(theme::bg(theme::CHIP_BG())),
         text_color: Some(theme::INK()),
         border: Border {
-            color: Color::from_rgba(0.24, 0.35, 0.48, 0.25),
+            color: if theme::is_light() {
+                theme::BORDER()
+            } else {
+                Color::from_rgba(0.24, 0.35, 0.48, 0.25)
+            },
             width: 1.0,
             radius: radius.into(),
         },
@@ -327,12 +331,50 @@ where
         background: Some(theme::bg(bgc)),
         text_color: Some(theme::ON_ACCENT()),
         border: Border {
-            color: Color::from_rgba(1.0, 1.0, 1.0, 0.15),
+            color: if theme::is_light() {
+                Color::from_rgba(0.0, 0.0, 0.0, 0.08)
+            } else {
+                Color::from_rgba(1.0, 1.0, 1.0, 0.15)
+            },
             width: 1.0,
             radius: radius.into(),
         },
         ..Default::default()
     })
+}
+
+/// Icon and tile colors per content kind. Dark: bright glyph on a deep tint.
+/// Light: saturated glyph on a pastel tint, so tiles are not dark blobs on white.
+/// `detail` selects the slightly stronger variant used in the detail header.
+fn kind_colors(kind: crate::format::ContentKind, detail: bool) -> (Color, Color) {
+    use crate::format::ContentKind::*;
+    let rgb = |r: f32, g: f32, b: f32| Color::from_rgb(r, g, b);
+    if theme::is_light() {
+        return match kind {
+            Link => (rgb(0.15, 0.40, 0.85), rgb(0.89, 0.94, 1.0)),
+            Code => (rgb(0.42, 0.33, 0.80), rgb(0.93, 0.91, 0.99)),
+            Text => (rgb(0.35, 0.40, 0.50), rgb(0.92, 0.93, 0.95)),
+            File => (rgb(0.76, 0.43, 0.04), rgb(1.0, 0.94, 0.84)),
+            Image => (rgb(0.05, 0.50, 0.68), rgb(0.87, 0.95, 0.98)),
+        };
+    }
+    if detail {
+        match kind {
+            Link => (rgb(0.40, 0.70, 1.0), rgb(0.10, 0.22, 0.38)),
+            Code => (rgb(0.70, 0.65, 1.0), rgb(0.18, 0.16, 0.34)),
+            Text => (rgb(0.85, 0.90, 0.98), rgb(0.14, 0.18, 0.26)),
+            File => (rgb(1.0, 0.75, 0.35), rgb(0.30, 0.21, 0.11)),
+            Image => (rgb(0.48, 0.85, 1.0), rgb(0.09, 0.24, 0.32)),
+        }
+    } else {
+        match kind {
+            Link => (rgb(0.35, 0.65, 1.0), rgb(0.09, 0.16, 0.26)),
+            Code => (rgb(0.60, 0.55, 0.95), rgb(0.14, 0.12, 0.24)),
+            Text => (rgb(0.75, 0.80, 0.88), rgb(0.11, 0.14, 0.19)),
+            File => (rgb(0.98, 0.70, 0.30), rgb(0.23, 0.17, 0.09)),
+            Image => (rgb(0.40, 0.80, 0.95), rgb(0.08, 0.19, 0.25)),
+        }
+    }
 }
 
 /// Large rounded type chip (list + detail header), matching the product mockup.
@@ -344,28 +386,7 @@ where
     Message: 'a,
 {
     let icon_size = size * 0.50;
-    let (icon_color, chip_bg) = match kind {
-        crate::format::ContentKind::Link => (
-            Color::from_rgb(0.35, 0.65, 1.0),
-            Color::from_rgb(0.09, 0.16, 0.26),
-        ),
-        crate::format::ContentKind::Code => (
-            Color::from_rgb(0.60, 0.55, 0.95),
-            Color::from_rgb(0.14, 0.12, 0.24),
-        ),
-        crate::format::ContentKind::Text => (
-            Color::from_rgb(0.75, 0.80, 0.88),
-            Color::from_rgb(0.11, 0.14, 0.19),
-        ),
-        crate::format::ContentKind::File => (
-            Color::from_rgb(0.98, 0.70, 0.30),
-            Color::from_rgb(0.23, 0.17, 0.09),
-        ),
-        crate::format::ContentKind::Image => (
-            Color::from_rgb(0.40, 0.80, 0.95),
-            Color::from_rgb(0.08, 0.19, 0.25),
-        ),
-    };
+    let (icon_color, chip_bg) = kind_colors(kind, false);
 
     container(for_kind(kind, icon_color, icon_size))
         .width(Length::Fixed(size))
@@ -375,7 +396,11 @@ where
         .style(move |_t: &iced::Theme| container::Style {
             background: Some(theme::bg(chip_bg)),
             border: Border {
-                color: Color::from_rgba(0.35, 0.50, 0.75, 0.22),
+                color: if theme::is_light() {
+                    Color { a: 0.30, ..icon_color }
+                } else {
+                    Color::from_rgba(0.35, 0.50, 0.75, 0.22)
+                },
                 width: 1.0,
                 radius: 10.0.into(),
             },
@@ -391,28 +416,7 @@ where
     Message: 'a,
 {
     let icon_size = size * 0.52;
-    let (icon_color, chip_bg) = match kind {
-        crate::format::ContentKind::Link => (
-            Color::from_rgb(0.40, 0.70, 1.0),
-            Color::from_rgb(0.10, 0.22, 0.38),
-        ),
-        crate::format::ContentKind::Code => (
-            Color::from_rgb(0.70, 0.65, 1.0),
-            Color::from_rgb(0.18, 0.16, 0.34),
-        ),
-        crate::format::ContentKind::Text => (
-            Color::from_rgb(0.85, 0.90, 0.98),
-            Color::from_rgb(0.14, 0.18, 0.26),
-        ),
-        crate::format::ContentKind::File => (
-            Color::from_rgb(1.0, 0.75, 0.35),
-            Color::from_rgb(0.30, 0.21, 0.11),
-        ),
-        crate::format::ContentKind::Image => (
-            Color::from_rgb(0.48, 0.85, 1.0),
-            Color::from_rgb(0.09, 0.24, 0.32),
-        ),
-    };
+    let (icon_color, chip_bg) = kind_colors(kind, true);
 
     container(for_kind(kind, icon_color, icon_size))
         .width(Length::Fixed(size))
@@ -422,7 +426,11 @@ where
         .style(move |_t: &iced::Theme| container::Style {
             background: Some(theme::bg(chip_bg)),
             border: Border {
-                color: Color::from_rgba(0.40, 0.70, 1.0, 0.4),
+                color: if theme::is_light() {
+                    Color { a: 0.45, ..icon_color }
+                } else {
+                    Color::from_rgba(0.40, 0.70, 1.0, 0.4)
+                },
                 width: 1.5,
                 radius: (size * 0.5).into(), // Circular hero chip
             },

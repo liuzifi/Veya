@@ -8,6 +8,15 @@ const QUICK_HEIGHT: f32 = 580.0;
 const ROW_HEIGHT: f32 = 64.0;
 /// Rows from the end of the loaded list at which keyboard navigation loads the next page.
 const LOAD_MORE_LOOKAHEAD: usize = 5;
+/// Width of the right-hand strip (close / fold / title). It is also the whole
+/// window width while the panel is folded.
+const STRIP_WIDTH: f32 = 28.0;
+/// The first rows are numbered 1-9 then 0, matching Ctrl+digit.
+const NUMBERED_ROWS: usize = 10;
+const ROW_NUMBER_LABELS: [&str; NUMBERED_ROWS] = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"];
+const NUMBER_COLUMN_WIDTH: f32 = 22.0;
+/// Two presses on the strip closer than this toggle the always-on-top pin.
+const STRIP_DOUBLE_CLICK: std::time::Duration = std::time::Duration::from_millis(400);
 
 pub(super) struct QuickPanel {
     target: Option<PasteTarget>,
@@ -15,6 +24,19 @@ pub(super) struct QuickPanel {
     pending: Option<u64>,
     pub(super) sending: bool,
     error: Option<String>,
+    strip: Strip,
+    ctrl_down: bool,
+}
+
+/// Pin / fold state of the picker. It lives inside `QuickPanel`, so leaving
+/// the picker (Esc, close button, opening the manager) resets it.
+#[derive(Default)]
+struct Strip {
+    pinned: bool,
+    folded: bool,
+    last_press: Option<std::time::Instant>,
+    /// Window size to return to when unfolding.
+    expanded_size: iced::Size,
 }
 
 struct ManagementState {
@@ -28,6 +50,10 @@ struct ManagementState {
 }
 
 impl QuickPanel {
+    pub(super) fn strip_folded(&self) -> bool {
+        self.strip.folded
+    }
+
     pub(super) fn busy(&self) -> bool {
         self.pending.is_some() || self.sending
     }
@@ -78,8 +104,11 @@ impl App {
                 pending: None,
                 sending: false,
                 error: self.last_paste_error.take(),
+                strip: Strip::default(),
+                ctrl_down: false,
             });
         } else if let Some(quick) = &mut self.quick {
+            quick.ctrl_down = false;
             quick.target = target;
             quick.pending = None;
             quick.error = None;
@@ -96,6 +125,12 @@ impl App {
         self.window_hidden = false;
         self.set_history_active(true);
         let query = self.request_history_query(true);
+        if self.quick.as_ref().is_some_and(|quick| quick.strip.pinned) {
+            // A pinned picker keeps the place the user dragged it to; the hotkey
+            // only refreshes the paste target and brings the panel back to focus.
+            let unfold = self.set_quick_folded(false);
+            return Task::batch([query, unfold, activate_window(generation)]);
+        }
         #[cfg(windows)]
         let placement =
             veya_windows::platform::window_place::startup_placement(QUICK_WIDTH, QUICK_HEIGHT);
@@ -148,19 +183,38 @@ impl App {
         if self.quick.as_ref().is_some_and(|quick| quick.sending) {
             return Task::none();
         }
+        let leave = self.leave_strip_state();
         let size = self.restore_management_state();
         let generation = self.advance_window_generation();
         self.window_hidden = false;
         self.set_history_active(self.page == Page::History);
         let query = self.request_history_query(false);
-        let window = iced::window::get_latest().then(move |id| {
+        let window = leave.chain(iced::window::get_latest().then(move |id| {
             let resize = match (id, size) {
                 (Some(id), Some(size)) => iced::window::resize(id, size),
                 _ => Task::none(),
             };
             resize.chain(activate_window(generation))
-        });
+        }));
         Task::batch([query, window])
+    }
+
+    /// Undo what pinning and folding did to the native window (topmost level,
+    /// shifted position) before the shared window returns to manager use.
+    fn leave_strip_state(&self) -> Task<Message> {
+        let Some(quick) = &self.quick else {
+            return Task::none();
+        };
+        let shift = if quick.strip.folded {
+            shift_window_x(quick.strip.expanded_size.width - STRIP_WIDTH)
+        } else {
+            Task::none()
+        };
+        if quick.strip.pinned {
+            shift.chain(set_window_level(iced::window::Level::Normal))
+        } else {
+            shift
+        }
     }
 
     pub(super) fn dismiss_quick(&mut self, restore: bool) -> Task<Message> {
@@ -171,11 +225,13 @@ impl App {
             return Task::none();
         }
         let target = quick.target;
+        let leave = self.leave_strip_state();
         let generation = self.advance_window_generation();
         let size = self.restore_management_state();
         self.window_hidden = true;
         self.set_history_active(false);
         hide_window()
+            .chain(leave)
             .chain(iced::window::get_latest().then(move |id| match (id, size) {
                 (Some(id), Some(size)) => iced::window::resize(id, size),
                 _ => Task::none(),
@@ -308,14 +364,20 @@ impl App {
                     return Task::none();
                 };
                 quick.sending = true;
-                self.window_hidden = true;
-                self.set_history_active(false);
-                hide_window().chain(Task::perform(
+                let pinned = quick.strip.pinned;
+                let paste = Task::perform(
                     run_system_action(move || {
                         veya_windows::platform::paste::paste_to_target(target, sequence)
                     }),
                     move |result| Message::QuickFinished { request_id, result },
-                ))
+                );
+                if pinned {
+                    // A pinned picker stays on screen while the paste is sent.
+                    return paste;
+                }
+                self.window_hidden = true;
+                self.set_history_active(false);
+                hide_window().chain(paste)
             }
         }
     }
@@ -333,6 +395,15 @@ impl App {
         }
         quick.pending = None;
         quick.sending = false;
+        if quick.strip.pinned {
+            // Pinned: report a failure in place and keep the panel open either way.
+            if let Err(error) = result {
+                quick.error = Some(error);
+            }
+            self.window_hidden = false;
+            self.set_history_active(true);
+            return Task::none();
+        }
         if let Err(error) = result {
             let target = quick.target;
             let current = veya_windows::platform::paste::capture_target();
@@ -354,6 +425,113 @@ impl App {
                 (Some(id), Some(size)) => iced::window::resize(id, size),
                 _ => Task::none(),
             })
+        }
+    }
+
+    /// Ctrl+1..9,0 pastes the matching numbered row; the number is the row's
+    /// position in the list as currently filtered and sorted.
+    pub(super) fn quick_paste_nth(&mut self, index: usize) -> Task<Message> {
+        if index >= NUMBERED_ROWS {
+            return Task::none();
+        }
+        let Some(sequence) = self.state.cards.iter().nth(index).map(|card| card.sequence) else {
+            return Task::none();
+        };
+        self.card_menu = None;
+        self.quick_paste(sequence)
+    }
+
+    /// Windows reports Ctrl+1/9/0 with a text payload, so the focused search
+    /// box would also type the digit. While Ctrl is held, a change that only
+    /// inserts one digit is that echo and must not edit the search text.
+    pub(super) fn is_ctrl_digit_echo(&self, new: &str) -> bool {
+        self.quick.as_ref().is_some_and(|quick| quick.ctrl_down)
+            && is_single_digit_insertion(&self.search, new)
+    }
+
+    /// Press on the blank part of the right strip: a quick second press pins or
+    /// unpins the window, a single press starts dragging it.
+    pub(super) fn quick_strip_press(&mut self) -> Task<Message> {
+        let Some(quick) = &mut self.quick else {
+            return Task::none();
+        };
+        let now = std::time::Instant::now();
+        let double = quick
+            .strip
+            .last_press
+            .is_some_and(|last| now.duration_since(last) < STRIP_DOUBLE_CLICK);
+        if !double {
+            quick.strip.last_press = Some(now);
+            return self
+                .window_id
+                .map(iced::window::drag)
+                .unwrap_or_else(Task::none);
+        }
+        quick.strip.last_press = None;
+        if quick.strip.folded {
+            // A folded panel is always pinned; unfold it first.
+            return Task::none();
+        }
+        quick.strip.pinned = !quick.strip.pinned;
+        let level = if quick.strip.pinned {
+            iced::window::Level::AlwaysOnTop
+        } else {
+            iced::window::Level::Normal
+        };
+        set_window_level(level)
+    }
+
+    /// Fold the picker down to the right strip, or unfold it again. Folding
+    /// pins the window, otherwise losing focus would close it immediately.
+    pub(super) fn set_quick_folded(&mut self, folded: bool) -> Task<Message> {
+        let window_size = self.window_size;
+        let Some(quick) = &mut self.quick else {
+            return Task::none();
+        };
+        if quick.strip.folded == folded {
+            return Task::none();
+        }
+        quick.strip.folded = folded;
+        if folded {
+            quick.strip.expanded_size = window_size;
+            let shift = window_size.width - STRIP_WIDTH;
+            let fold = resize_window(iced::Size::new(STRIP_WIDTH, window_size.height))
+                .chain(shift_window_x(shift));
+            if quick.strip.pinned {
+                fold
+            } else {
+                quick.strip.pinned = true;
+                Task::batch([set_window_level(iced::window::Level::AlwaysOnTop), fold])
+            }
+        } else {
+            let size = quick.strip.expanded_size;
+            shift_window_x(-(size.width - STRIP_WIDTH)).chain(resize_window(size))
+        }
+    }
+
+    /// Focus loss closes the picker, unless it is pinned.
+    pub(super) fn quick_unfocused(&mut self) -> Task<Message> {
+        if self.quick.as_ref().is_some_and(|quick| quick.strip.pinned) {
+            return Task::none();
+        }
+        if self.quick_group_input.is_some() {
+            self.quick_group_input = None;
+            return Task::none();
+        }
+        self.dismiss_quick(false)
+    }
+
+    /// While pinned, the user moves between other apps; keep the paste target
+    /// on the last external window that was in front.
+    pub(super) fn track_pinned_target(&mut self) {
+        let Some(quick) = self.quick.as_mut() else {
+            return;
+        };
+        if !quick.strip.pinned || quick.busy() {
+            return;
+        }
+        if let Some(target) = veya_windows::platform::paste::capture_app_target() {
+            quick.target = Some(target);
         }
     }
 
@@ -392,32 +570,12 @@ impl App {
         };
         let busy = quick.busy();
         let pending = self.history_list_pending();
-        let header = row![
-            mouse_area(
-                row![
-                    iced::widget::image(logo_handle()).width(22).height(22),
-                    body("快捷粘贴").size(15),
-                ]
-                .spacing(8)
-                .align_y(Alignment::Center)
-            )
-            .on_press(Message::WindowDrag),
-            Space::with_width(Length::Fill),
-            button(meta("管理历史").size(12))
-                .style(theme::action_button)
-                .on_press(Message::OpenManager),
-            button(icons::icon(Icon::Close, theme::MUTED(), 12.0))
-                .style(theme::win_button)
-                .on_press(Message::QuickDismiss { restore: true }),
-        ]
-        .align_y(Alignment::Center)
-        .spacing(6);
         let search: Element<'_, Message> = if let Some(input) = &self.quick_group_input {
             let field = text_input("输入分组名称…", &input.value)
                 .id(group_input_id())
                 .size(14)
                 .padding(10)
-                .style(theme::input_style)
+                .style(theme::field_style)
                 .on_input(Message::QuickGroupInputChanged)
                 .on_submit(Message::QuickGroupInputSubmit);
             // In rename mode append a danger button to delete the group; create
@@ -439,7 +597,7 @@ impl App {
                 .id(search_input_id())
                 .size(14)
                 .padding(10)
-                .style(theme::input_style);
+                .style(theme::field_style);
             if busy {
                 field.into()
             } else {
@@ -468,7 +626,7 @@ impl App {
             .into()
         } else {
             let mut rows = column![].spacing(0);
-            for card in self.state.cards.iter() {
+            for (index, card) in self.state.cards.iter().enumerate() {
                 let source = match card.source_confidence {
                     veya_core::SourceConfidence::Exact => short_app(&card.source_app),
                     veya_core::SourceConfidence::Likely => {
@@ -481,7 +639,15 @@ impl App {
                 if card.pinned {
                     metadata = metadata.push(icons::icon(Icon::Pin, theme::ACCENT(), 11.0));
                 }
+                let number: Element<'_, Message> = match ROW_NUMBER_LABELS.get(index) {
+                    Some(label) => container(theme::keycap(label))
+                        .width(Length::Fixed(NUMBER_COLUMN_WIDTH))
+                        .center_x(Length::Fixed(NUMBER_COLUMN_WIDTH))
+                        .into(),
+                    None => Space::with_width(Length::Fixed(NUMBER_COLUMN_WIDTH)).into(),
+                };
                 let content = row![
+                    number,
                     history::card_leading_visual(card, 34.0),
                     column![
                         body(compact_preview(&card.content_preview, 46))
@@ -492,7 +658,7 @@ impl App {
                     .spacing(5)
                     .width(Length::Fill),
                 ]
-                .spacing(10)
+                .spacing(8)
                 .align_y(Alignment::Center);
                 let row = button(content)
                     .width(Length::Fill)
@@ -518,13 +684,15 @@ impl App {
                 .into()
         };
         let footer = row![
-            meta("↑ ↓ 选择 · Enter 粘贴 · Esc 返回").size(11),
+            button(meta("管理历史").size(12))
+                .style(theme::action_button)
+                .on_press(Message::OpenManager),
             Space::with_width(Length::Fill),
+            meta("↑ ↓ 选择 · Enter 粘贴 · Ctrl+1…0 快粘 · Esc 关闭").size(11),
         ]
         .spacing(4)
         .align_y(Alignment::Center);
         let mut layout = column![
-            header,
             search,
             group_tabs,
             theme::hdivider(),
@@ -537,8 +705,19 @@ impl App {
         } else if busy {
             layout = layout.push(meta("正在粘贴，请松开按键…").size(12));
         }
-        let base = container(layout.push(footer))
+        let strip = self.quick_strip(quick);
+        if quick.strip.folded {
+            return container(strip)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .style(theme::shell_style)
+                .into();
+        }
+        let left = container(layout.push(footer))
             .padding(14)
+            .width(Length::Fill)
+            .height(Length::Fill);
+        let base = container(row![left, theme::vdivider(), strip])
             .width(Length::Fill)
             .height(Length::Fill)
             .style(theme::shell_style);
@@ -553,6 +732,44 @@ impl App {
             })
             .unwrap_or_else(|| Space::new(Length::Fill, Length::Fill).into());
         stack([base.into(), overlay]).into()
+    }
+
+    /// Right-hand strip: close and fold buttons on top, the title below. Blank
+    /// space drags the window; a quick double press pins it on top.
+    fn quick_strip(&self, quick: &QuickPanel) -> Element<'_, Message> {
+        let pinned = quick.strip.pinned;
+        let folded = quick.strip.folded;
+        let tint = if pinned { theme::ACCENT() } else { theme::MUTED() };
+        let close = button(icons::icon(Icon::Close, theme::MUTED(), 12.0))
+            .padding(pad(5.0, 5.0, 5.0, 5.0))
+            .style(theme::win_button)
+            .on_press(Message::QuickDismiss { restore: true });
+        let fold = button(meta(if folded { "<<" } else { ">>" }).size(13).color(tint))
+            .padding(pad(2.0, 3.0, 2.0, 3.0))
+            .style(theme::win_button)
+            .on_press(Message::QuickToggleFold);
+        let title = column![
+            vertical_text("Veya", tint),
+            Space::with_height(8),
+            vertical_text(if pinned { "窗口置顶" } else { "快捷粘贴" }, tint),
+        ]
+        .align_x(Alignment::Center);
+        let blank = mouse_area(
+            container(title)
+                .padding(pad(10.0, 0.0, 0.0, 0.0))
+                .center_x(Length::Fill)
+                .height(Length::Fill),
+        )
+        .on_press(Message::QuickStripPress);
+        container(
+            column![close, fold, blank]
+                .align_x(Alignment::Center)
+                .spacing(2)
+                .padding(pad(6.0, 0.0, 6.0, 0.0)),
+        )
+        .width(Length::Fixed(STRIP_WIDTH))
+        .height(Length::Fill)
+        .into()
     }
 
     /// Horizontal group-tab row: "全部" + one chip per group + a "+ 新建" button.
@@ -659,6 +876,46 @@ impl App {
     }
 }
 
+/// Text laid out top to bottom, one glyph per line (iced cannot rotate text).
+fn vertical_text<'a>(label: &'a str, color: Color) -> Element<'a, Message> {
+    column(
+        label
+            .chars()
+            .map(|glyph| meta(glyph.to_string()).size(12).color(color).into()),
+    )
+    .align_x(Alignment::Center)
+    .spacing(1)
+    .into()
+}
+
+fn set_window_level(level: iced::window::Level) -> Task<Message> {
+    iced::window::get_latest().then(move |id| match id {
+        Some(id) => iced::window::change_level(id, level),
+        None => Task::none(),
+    })
+}
+
+fn resize_window(size: iced::Size) -> Task<Message> {
+    iced::window::get_latest().then(move |id| match id {
+        Some(id) => iced::window::resize(id, size),
+        None => Task::none(),
+    })
+}
+
+/// Move the window horizontally by `dx` logical pixels (keeps the right edge
+/// in place while folding and unfolding).
+fn shift_window_x(dx: f32) -> Task<Message> {
+    iced::window::get_latest().then(move |id| {
+        let Some(id) = id else {
+            return Task::none();
+        };
+        iced::window::get_position(id).then(move |position| match position {
+            Some(at) => iced::window::move_to(id, iced::Point::new(at.x + dx, at.y)),
+            None => Task::none(),
+        })
+    })
+}
+
 fn quick_scroll_id() -> scrollable::Id {
     scrollable::Id::new("quick-history")
 }
@@ -690,7 +947,38 @@ async fn run_system_action(
     rx.await.map_err(|_| "粘贴操作已中断".to_string())?
 }
 
+/// Ctrl+1..9 map to rows 0..8 and Ctrl+0 to row 9, like the on-screen numbers.
+fn ctrl_digit_index(key: &Key) -> Option<usize> {
+    let Key::Character(text) = key else {
+        return None;
+    };
+    let mut chars = text.chars();
+    let digit = chars.next()?.to_digit(10)?;
+    if chars.next().is_some() {
+        return None;
+    }
+    Some((digit as usize + NUMBERED_ROWS - 1) % NUMBERED_ROWS)
+}
+
+/// True when `new` is `old` with exactly one ASCII digit inserted somewhere.
+fn is_single_digit_insertion(old: &str, new: &str) -> bool {
+    if new.chars().count() != old.chars().count() + 1 {
+        return false;
+    }
+    new.char_indices().any(|(at, ch)| {
+        ch.is_ascii_digit() && {
+            let mut rest = String::with_capacity(old.len());
+            rest.push_str(&new[..at]);
+            rest.push_str(&new[at + ch.len_utf8()..]);
+            rest == old
+        }
+    })
+}
+
 fn quick_key(key: Key, modifiers: Modifiers) -> Option<Message> {
+    if modifiers == Modifiers::CTRL {
+        return ctrl_digit_index(&key).map(Message::QuickPasteNth);
+    }
     if !modifiers.is_empty() {
         return None;
     }
@@ -712,18 +1000,19 @@ pub(super) fn quick_event(
         iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { key, modifiers, .. }) => {
             quick_key(key, modifiers)
         }
-        iced::Event::Window(iced::window::Event::Unfocused) => {
-            Some(Message::QuickDismiss { restore: false })
+        iced::Event::Keyboard(iced::keyboard::Event::ModifiersChanged(modifiers)) => {
+            Some(Message::QuickCtrl(modifiers.control()))
         }
+        iced::Event::Window(iced::window::Event::Unfocused) => Some(Message::QuickUnfocused),
         _ => None,
     }
 }
 
 #[cfg(test)]
-mod tests {
+pub(in crate::app) mod tests {
     use super::*;
 
-    fn isolated_app() -> App {
+    pub(in crate::app) fn isolated_app() -> App {
         let (cmd_tx, _) = std::sync::mpsc::channel();
         let (_, event_rx) = std::sync::mpsc::channel();
         let (_, activation_rx) = std::sync::mpsc::channel();
@@ -763,6 +1052,7 @@ mod tests {
             content_modal_for: None,
             requested_content: None,
             clear_history_confirmation_open: false,
+            data_job: Default::default(),
             copied_tick: 0,
             show_qrcode: false,
             source_paths: HashMap::new(),
@@ -1104,9 +1394,153 @@ mod tests {
             pending: Some(7),
             sending: false,
             error: None,
+            strip: Strip::default(),
+            ctrl_down: false,
         };
         assert!(panel.accepts(7));
         assert!(!panel.accepts(6));
         assert!(panel.busy());
+    }
+
+    #[test]
+    fn ctrl_digits_map_to_the_numbered_rows() {
+        let key = |s: &str| Key::Character(s.into());
+        let nth = |s: &str, mods| match quick_key(key(s), mods) {
+            Some(Message::QuickPasteNth(index)) => Some(index),
+            _ => None,
+        };
+        assert_eq!(nth("1", Modifiers::CTRL), Some(0));
+        assert_eq!(nth("9", Modifiers::CTRL), Some(8));
+        assert_eq!(nth("0", Modifiers::CTRL), Some(9));
+        assert_eq!(nth("a", Modifiers::CTRL), None);
+        assert_eq!(nth("12", Modifiers::CTRL), None);
+        assert_eq!(nth("1", Modifiers::empty()), None, "plain digits still type");
+        assert_eq!(nth("1", Modifiers::CTRL | Modifiers::SHIFT), None);
+        assert_eq!(nth("1", Modifiers::ALT), None);
+    }
+
+    #[test]
+    fn only_a_single_inserted_digit_counts_as_an_echo() {
+        assert!(is_single_digit_insertion("ab", "ab1"));
+        assert!(is_single_digit_insertion("ab", "a0b"));
+        assert!(is_single_digit_insertion("", "9"));
+        assert!(is_single_digit_insertion("中文", "中3文"));
+        assert!(!is_single_digit_insertion("ab", "abc"));
+        assert!(!is_single_digit_insertion("ab", "ab12"));
+        assert!(!is_single_digit_insertion("ab", "ac1"));
+        assert!(!is_single_digit_insertion("ab1", "ab"));
+    }
+
+    #[test]
+    fn ctrl_digit_echo_is_dropped_only_while_ctrl_is_held() {
+        let mut app = quick_app();
+        app.search = "ab".into();
+        let _ = app.update(Message::QuickCtrl(true));
+        let _ = app.update(Message::SearchChanged("ab1".into()));
+        assert_eq!(app.search, "ab");
+        let _ = app.update(Message::SearchChanged("abc".into()));
+        assert_eq!(app.search, "abc", "letters and pastes still edit the search");
+        let _ = app.update(Message::QuickCtrl(false));
+        let _ = app.update(Message::SearchChanged("abc1".into()));
+        assert_eq!(app.search, "abc1");
+    }
+
+    #[test]
+    fn numbering_covers_ten_rows_and_ignores_missing_ones() {
+        let mut app = quick_app();
+        assert_eq!(ROW_NUMBER_LABELS.len(), NUMBERED_ROWS);
+        let _ = app.update(Message::QuickPasteNth(9));
+        let _ = app.update(Message::QuickPasteNth(10));
+        assert!(app.quick.as_ref().is_some_and(|quick| !quick.busy()));
+        render_at(&app, iced::Size::new(QUICK_WIDTH, QUICK_HEIGHT));
+    }
+
+    fn quick_app() -> App {
+        let (mut app, _rx) = ready_text_app();
+        let _ = app.show_quick(None);
+        app
+    }
+
+    fn strip(app: &App) -> &Strip {
+        &app.quick.as_ref().expect("quick panel is open").strip
+    }
+
+    #[test]
+    fn double_press_on_the_strip_toggles_the_pin() {
+        let mut app = quick_app();
+        let _ = app.update(Message::QuickStripPress);
+        assert!(!strip(&app).pinned, "a single press only drags");
+        let _ = app.update(Message::QuickStripPress);
+        assert!(strip(&app).pinned);
+        let _ = app.update(Message::QuickStripPress);
+        let _ = app.update(Message::QuickStripPress);
+        assert!(!strip(&app).pinned);
+    }
+
+    #[test]
+    fn slow_presses_never_count_as_a_double_press() {
+        let mut app = quick_app();
+        let _ = app.update(Message::QuickStripPress);
+        app.quick.as_mut().unwrap().strip.last_press =
+            Some(std::time::Instant::now() - STRIP_DOUBLE_CLICK * 2);
+        let _ = app.update(Message::QuickStripPress);
+        assert!(!strip(&app).pinned);
+    }
+
+    #[test]
+    fn losing_focus_closes_the_panel_unless_it_is_pinned() {
+        let mut app = quick_app();
+        app.quick.as_mut().unwrap().strip.pinned = true;
+        let _ = app.update(Message::QuickUnfocused);
+        assert!(app.quick.is_some());
+        app.quick.as_mut().unwrap().strip.pinned = false;
+        let _ = app.update(Message::QuickUnfocused);
+        assert!(app.quick.is_none());
+    }
+
+    #[test]
+    fn folding_pins_and_unfolding_keeps_the_pin() {
+        let mut app = quick_app();
+        app.window_size = iced::Size::new(QUICK_WIDTH, QUICK_HEIGHT);
+        let _ = app.update(Message::QuickToggleFold);
+        assert!(strip(&app).folded && strip(&app).pinned);
+        assert_eq!(strip(&app).expanded_size.width, QUICK_WIDTH);
+        let _ = app.update(Message::QuickToggleFold);
+        assert!(!strip(&app).folded && strip(&app).pinned);
+    }
+
+    #[test]
+    fn a_folded_panel_ignores_double_press_unpinning() {
+        let mut app = quick_app();
+        let _ = app.update(Message::QuickToggleFold);
+        let _ = app.update(Message::QuickStripPress);
+        let _ = app.update(Message::QuickStripPress);
+        assert!(strip(&app).pinned);
+    }
+
+    #[test]
+    fn closing_a_pinned_folded_panel_clears_the_session_state() {
+        let mut app = quick_app();
+        let _ = app.update(Message::QuickToggleFold);
+        let _ = app.update(Message::QuickDismiss { restore: true });
+        assert!(app.quick.is_none());
+        let _ = app.show_quick(None);
+        assert!(!strip(&app).pinned && !strip(&app).folded);
+    }
+
+    #[test]
+    fn opening_the_manager_clears_pin_and_fold() {
+        let mut app = quick_app();
+        let _ = app.update(Message::QuickToggleFold);
+        let _ = app.open_manager();
+        assert!(app.quick.is_none());
+    }
+
+    #[test]
+    fn folded_and_pinned_panel_still_renders() {
+        let mut app = quick_app();
+        render_at(&app, iced::Size::new(QUICK_WIDTH, QUICK_HEIGHT));
+        let _ = app.update(Message::QuickToggleFold);
+        render_at(&app, iced::Size::new(STRIP_WIDTH, QUICK_HEIGHT));
     }
 }

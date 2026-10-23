@@ -22,9 +22,11 @@ use crate::icons::{self, Icon};
 use crate::theme::{self, body, meta, pad, section_label};
 use crate::tray::{self, TrayCmd};
 use crate::worker::{spawn_worker, WorkerCmd, WorkerEvent, WorkerHandle};
+use veya_storage::BackupInfo;
 use veya_windows::hotkey::{Hotkey, MOD_ALT, MOD_CONTROL, MOD_SHIFT};
 use veya_windows::platform::{PasteTarget, WindowSignal};
 
+mod data;
 mod detail;
 mod history;
 mod quick;
@@ -278,6 +280,7 @@ pub struct App {
     content_modal_for: Option<u32>,
     requested_content: Option<u32>,
     clear_history_confirmation_open: bool,
+    data_job: data::DataJob,
     copied_tick: u32,
     show_qrcode: bool,
     source_paths: HashMap<String, String>,
@@ -309,6 +312,21 @@ pub enum Message {
     QuickGroupInputChanged(String),
     QuickGroupInputSubmit,
     QuickGroupInputCancel,
+    /// Ctrl+1..9,0: paste the Nth row (0-based) of the list.
+    QuickPasteNth(usize),
+    /// Whether Ctrl is held; used to tell a Ctrl+digit chord from typing.
+    QuickCtrl(bool),
+    BackupDatabase,
+    BackupPicked(Option<std::path::PathBuf>),
+    BackupFinished(Result<(std::path::PathBuf, BackupInfo), String>),
+    RestoreDatabase,
+    RestorePicked(Option<std::path::PathBuf>),
+    RestoreInspected(Result<(std::path::PathBuf, BackupInfo), String>),
+    ConfirmRestoreDatabase,
+    CancelRestoreDatabase,
+    QuickStripPress,
+    QuickToggleFold,
+    QuickUnfocused,
     QuickDeleteGroup(i64),
     QuickOpenCardMenu(u32),
     QuickCloseCardMenu,
@@ -475,6 +493,7 @@ impl App {
                 content_modal_for: None,
                 requested_content: None,
                 clear_history_confirmation_open: false,
+                data_job: Default::default(),
                 copied_tick: 0,
                 show_qrcode: false,
                 source_paths: HashMap::new(),
@@ -690,7 +709,7 @@ impl App {
             match message {
                 Message::RecopySelected => Message::QuickGroupInputSubmit,
                 Message::QuickDismiss { .. } => Message::QuickGroupInputCancel,
-                Message::QuickMove(_) => Message::QuickCloseCardMenu,
+                Message::QuickMove(_) | Message::QuickPasteNth(_) => Message::QuickCloseCardMenu,
                 other => other,
             }
         } else {
@@ -700,6 +719,39 @@ impl App {
             Message::QuickMove(delta) => self.quick_move(delta),
             Message::QuickPaste(sequence) => self.quick_paste(sequence),
             Message::QuickDismiss { restore } => self.dismiss_quick(restore),
+            Message::QuickPasteNth(index) => self.quick_paste_nth(index),
+            Message::QuickCtrl(down) => {
+                if let Some(quick) = &mut self.quick {
+                    quick.ctrl_down = down;
+                }
+                Task::none()
+            }
+            Message::BackupDatabase => self.start_backup(),
+            Message::BackupPicked(path) => self.backup_picked(path),
+            Message::BackupFinished(result) => {
+                self.backup_finished(result);
+                Task::none()
+            }
+            Message::RestoreDatabase => self.start_restore(),
+            Message::RestorePicked(path) => self.restore_picked(path),
+            Message::RestoreInspected(result) => {
+                self.restore_inspected(result);
+                Task::none()
+            }
+            Message::ConfirmRestoreDatabase => {
+                self.confirm_restore();
+                Task::none()
+            }
+            Message::CancelRestoreDatabase => {
+                self.cancel_restore();
+                Task::none()
+            }
+            Message::QuickStripPress => self.quick_strip_press(),
+            Message::QuickToggleFold => {
+                let folded = self.quick.as_ref().is_some_and(|quick| quick.strip_folded());
+                self.set_quick_folded(!folded)
+            }
+            Message::QuickUnfocused => self.quick_unfocused(),
             Message::QuickSelectGroup(group_id) => {
                 self.quick_group_sel = group_id;
                 self.request_history_query(true)
@@ -816,11 +868,15 @@ impl App {
             }
             Message::Tick => {
                 self.updates.poll();
+                self.track_pinned_target();
                 let mut tasks = Vec::new();
                 while let Ok(event) = self.worker.event_rx.try_recv() {
                     match event {
                         WorkerEvent::PastePrepared { request_id, result } => {
                             tasks.push(self.quick_prepared(request_id, result));
+                        }
+                        WorkerEvent::DatabaseRestored(result) => {
+                            tasks.push(self.database_restored(result));
                         }
                     }
                 }
@@ -925,6 +981,9 @@ impl App {
             }
             Message::SearchChanged(q) => {
                 if self.quick.as_ref().is_some_and(|quick| quick.busy()) {
+                    return Task::none();
+                }
+                if self.is_ctrl_digit_echo(&q) {
                     return Task::none();
                 }
                 self.search = q;
@@ -1634,7 +1693,10 @@ impl App {
                     .style(move |_t| iced::widget::container::Style {
                         background: Some(theme::bg(dot_color)),
                         border: iced::Border {
-                            color: Color::from_rgba(0.18, 0.82, 0.58, 0.5),
+                            color: Color {
+                                a: 0.5,
+                                ..theme::OK()
+                            },
                             width: 1.0,
                             radius: 3.5.into(),
                         },

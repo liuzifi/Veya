@@ -48,15 +48,15 @@ impl App {
         .on_press(Message::ToggleTracking)
         .style(move |_t, _s| iced::widget::button::Style {
             background: Some(theme::bg(if self.state.tracking {
-                Color::from_rgb(0.08, 0.20, 0.16)
+                theme::OK_SOFT()
             } else {
-                Color::from_rgb(0.12, 0.15, 0.19)
+                theme::NEUTRAL_SOFT()
             })),
             border: iced::Border {
                 color: if self.state.tracking {
-                    Color::from_rgba(0.18, 0.82, 0.58, 0.4)
+                    Color { a: 0.45, ..theme::OK() }
                 } else {
-                    Color::from_rgba(0.6, 0.6, 0.6, 0.2)
+                    theme::BORDER()
                 },
                 width: 1.0,
                 radius: 14.0.into(),
@@ -361,6 +361,10 @@ impl App {
         let group_data = container(
             column![
                 data_stats_row,
+                Space::with_height(12.0),
+                theme::hdivider(),
+                Space::with_height(12.0),
+                self.backup_section(),
                 Space::with_height(12.0),
                 theme::hdivider(),
                 Space::with_height(12.0),

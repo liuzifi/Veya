@@ -1,5 +1,6 @@
 //! Capture worker: platform events → enrich → FlowEngine → SQLite + UI snapshot.
 
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Arc;
 
@@ -44,6 +45,8 @@ pub enum WorkerCmd {
     UnexcludeApp { exe: String },
     DeleteRecord { sequences: Vec<u32> },
     SetPinned { sequences: Vec<u32>, pinned: bool },
+    /// Replace the whole database with a backup file (after an automatic safety copy).
+    RestoreDatabase { path: PathBuf },
     SetExpandedRaw(bool),
     SetHotkey(Hotkey),
     QueryHistory(HistoryQuery),
@@ -52,11 +55,21 @@ pub enum WorkerCmd {
     UnloadFullImage,
 }
 
+/// What a successful restore did, for the confirmation message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RestoreReport {
+    pub records: usize,
+    pub groups: usize,
+    /// Copy of the data that was replaced, kept so the restore can be undone.
+    pub safety_copy: PathBuf,
+}
+
 pub enum WorkerEvent {
     PastePrepared {
         request_id: u64,
         result: Result<u32, String>,
     },
+    DatabaseRestored(Result<RestoreReport, String>),
 }
 
 pub struct WorkerHandle {
@@ -80,6 +93,102 @@ fn db_path() -> std::path::PathBuf {
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("Veya")
         .join("veya.db")
+}
+
+/// Location of the live database, for backups made outside the worker.
+pub fn database_path() -> PathBuf {
+    db_path()
+}
+
+/// Automatic copies made before a restore are kept in a `backups` folder beside the
+/// database; only this many of the newest ones are retained.
+const SAFETY_COPIES_KEPT: usize = 5;
+const SAFETY_COPY_PREFIX: &str = "veya-before-restore-";
+
+fn load_theme_mode(store: &Store) -> ThemeMode {
+    store
+        .get_setting("theme")
+        .ok()
+        .flatten()
+        .map(|s| ThemeMode::from_key(&s))
+        .unwrap_or_default()
+}
+
+fn load_limits(store: &Store) -> (MaxItemsConfig, ExpiryConfig) {
+    let setting = |key: &str| store.get_setting(key).ok().flatten();
+    (
+        MaxItemsConfig::from_settings(
+            setting("max_items_enabled").as_deref(),
+            setting("max_items").as_deref(),
+        ),
+        ExpiryConfig::from_settings(
+            setting("expiry_enabled").as_deref(),
+            setting("expiry_days").as_deref(),
+            setting("retention").as_deref(),
+        ),
+    )
+}
+
+/// Delete all but the newest `keep` safety copies. The timestamp in the name sorts
+/// chronologically.
+fn prune_safety_copies(dir: &Path, keep: usize) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut copies: Vec<PathBuf> = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(SAFETY_COPY_PREFIX) && name.ends_with(".db"))
+        })
+        .collect();
+    copies.sort();
+    let excess = copies.len().saturating_sub(keep);
+    for old in copies.into_iter().take(excess) {
+        let _ = std::fs::remove_file(old);
+    }
+}
+
+/// Replace the live database with `backup`.
+///
+/// Order matters: the file is validated, then the current data is copied to a safety
+/// file (abort if that fails), and only then is the database replaced. The hotkey is a
+/// per-machine setting that is registered with the system, so it is kept as it was.
+fn restore_database(
+    store: &mut Store,
+    live: &Path,
+    backup: &Path,
+    stamp: &str,
+) -> Result<RestoreReport, String> {
+    if let (Ok(a), Ok(b)) = (live.canonicalize(), backup.canonicalize()) {
+        if a == b {
+            return Err("不能用当前正在使用的数据库文件自身来还原".into());
+        }
+    }
+    Store::inspect_backup(backup)?;
+    let dir = live
+        .parent()
+        .ok_or_else(|| "无法确定数据库所在目录".to_string())?
+        .join("backups");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("无法创建备份目录：{e}"))?;
+    let safety_copy = dir.join(format!("{SAFETY_COPY_PREFIX}{stamp}.db"));
+    Store::backup_file(live, &safety_copy)
+        .map_err(|e| format!("还原前无法备份当前数据，已取消还原：{e}"))?;
+
+    let hotkey = store.get_setting("window_hotkey").ok().flatten();
+    let info = store.restore_from(backup)?;
+    let _ = match hotkey {
+        Some(value) => store.set_setting("window_hotkey", &value),
+        None => store.remove_setting("window_hotkey"),
+    };
+    prune_safety_copies(&dir, SAFETY_COPIES_KEPT);
+    Ok(RestoreReport {
+        records: info.records,
+        groups: info.groups,
+        safety_copy,
+    })
 }
 
 /// The colour theme saved in the database, read before the worker starts so the first frame
@@ -586,29 +695,8 @@ fn run_worker(
         let mut hotkey_active = Hotkey::Disabled;
         let mut hotkey_error = None;
         let mut last_purge_ms = 0i64;
-        let mut theme_mode = store
-            .get_setting("theme")
-            .ok()
-            .flatten()
-            .map(|s| ThemeMode::from_key(&s))
-            .unwrap_or_default();
-        let mut max_items = MaxItemsConfig::from_settings(
-            store
-                .get_setting("max_items_enabled")
-                .ok()
-                .flatten()
-                .as_deref(),
-            store.get_setting("max_items").ok().flatten().as_deref(),
-        );
-        let mut expiry = ExpiryConfig::from_settings(
-            store
-                .get_setting("expiry_enabled")
-                .ok()
-                .flatten()
-                .as_deref(),
-            store.get_setting("expiry_days").ok().flatten().as_deref(),
-            store.get_setting("retention").ok().flatten().as_deref(),
-        );
+        let mut theme_mode = load_theme_mode(&store);
+        let (mut max_items, mut expiry) = load_limits(&store);
 
         publish(
             &shared,
@@ -826,6 +914,31 @@ fn run_worker(
                             hotkey_error = Some("快捷键服务尚未就绪，请稍后重试".into());
                             veya_windows::platform::request_hotkey_recording(false);
                         }
+                    }
+                    WorkerCmd::RestoreDatabase { path } => {
+                        let result = restore_database(
+                            &mut store,
+                            &store_path,
+                            &path,
+                            &veya_windows::platform::dialog::local_timestamp(),
+                        );
+                        match &result {
+                            Ok(report) => {
+                                // Everything the worker mirrors from the database is stale now.
+                                history_page.invalidate();
+                                history_page.detail_content = None;
+                                history_page.detail_error = None;
+                                modal_image = None;
+                                history_query.page = 0;
+                                flow.clear();
+                                excluded_apps = store.list_excluded().unwrap_or_default();
+                                theme_mode = load_theme_mode(&store);
+                                (max_items, expiry) = load_limits(&store);
+                                status_note = format!("已还原 {} 条记录", report.records);
+                            }
+                            Err(error) => status_note = format!("还原失败：{error}"),
+                        }
+                        let _ = event_tx.send(WorkerEvent::DatabaseRestored(result));
                     }
                     WorkerCmd::SetThemeMode(mode) => {
                         theme_mode = mode;
@@ -1761,5 +1874,94 @@ mod tests {
 
         assert_eq!(outcome, FlowOutcome::Recorded { sequence: 50 });
         assert_eq!(flow.len(), 1);
+    }
+
+    fn restore_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "veya-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn restore_keeps_a_safety_copy_and_the_current_hotkey_and_reloads_settings() {
+        let dir = restore_dir("restore");
+        let live = dir.join("veya.db");
+        let backup = dir.join("saved.db");
+        let mut store = Store::open(&live).unwrap();
+        store.insert_record(&text_record(1, "kept", 10)).unwrap();
+        store.set_setting("theme", "light").unwrap();
+        store.set_setting("max_items_enabled", "1").unwrap();
+        store.set_setting("max_items", "50").unwrap();
+        store.set_setting("window_hotkey", "Alt+V").unwrap();
+        Store::backup_file(&live, &backup).unwrap();
+
+        store.insert_record(&text_record(2, "newer", 20)).unwrap();
+        store.set_setting("theme", "dark").unwrap();
+        store.set_setting("max_items", "99").unwrap();
+        store.set_setting("window_hotkey", "Ctrl+Shift+V").unwrap();
+
+        let report = restore_database(&mut store, &live, &backup, "20261023-120000").unwrap();
+        assert_eq!(report.records, 1);
+        assert_eq!(store.count_records().unwrap(), 1);
+        assert!(report.safety_copy.exists());
+        assert_eq!(Store::inspect_backup(&report.safety_copy).unwrap().records, 2);
+        assert_eq!(load_theme_mode(&store), ThemeMode::from_key("light"));
+        let (max_items, _) = load_limits(&store);
+        assert_eq!((max_items.enabled, max_items.count), (true, 50));
+        assert_eq!(
+            store.get_setting("window_hotkey").unwrap().as_deref(),
+            Some("Ctrl+Shift+V"),
+            "the live hotkey registration is not rolled back"
+        );
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn restore_of_an_invalid_file_changes_nothing_and_leaves_no_safety_copy() {
+        let dir = restore_dir("restore-invalid");
+        let live = dir.join("veya.db");
+        let mut store = Store::open(&live).unwrap();
+        store.insert_record(&text_record(1, "kept", 10)).unwrap();
+        let bogus = dir.join("bogus.db");
+        std::fs::write(&bogus, "definitely not a sqlite database file").unwrap();
+
+        assert!(restore_database(&mut store, &live, &bogus, "x").is_err());
+        assert!(restore_database(&mut store, &live, &live, "x").is_err());
+        assert_eq!(store.count_records().unwrap(), 1);
+        assert!(!dir.join("backups").exists());
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn only_the_newest_safety_copies_are_kept() {
+        let dir = restore_dir("restore-prune");
+        for day in 1..=8 {
+            std::fs::write(
+                dir.join(format!("{SAFETY_COPY_PREFIX}202610{day:02}-000000.db")),
+                b"x",
+            )
+            .unwrap();
+        }
+        std::fs::write(dir.join("my-own-backup.db"), b"x").unwrap();
+        prune_safety_copies(&dir, 5);
+        let mut names: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        assert_eq!(names.len(), 6, "five copies plus the unrelated file");
+        assert!(names.contains(&"my-own-backup.db".to_string()));
+        assert!(names.iter().all(|n| !n.contains("20261001") && !n.contains("20261003")));
+        assert!(names.iter().any(|n| n.contains("20261008")));
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

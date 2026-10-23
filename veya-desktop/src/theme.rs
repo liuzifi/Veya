@@ -36,6 +36,20 @@ pub struct Palette {
     pub ok: Color,
     pub warn: Color,
     pub chip_bg: Color,
+    /// True for the light palette; lets a few widgets pick light-only variants.
+    pub light: bool,
+    /// Drop shadow under floating panels.
+    pub shadow: Color,
+    /// Dim layer behind modal dialogs.
+    pub backdrop: Color,
+    /// Fill of floating menus (context menu, pick-list popup).
+    pub overlay: Color,
+    /// Hover fill of destructive menu items.
+    pub danger_soft: Color,
+    /// Tinted fill for "on" status pills.
+    pub ok_soft: Color,
+    /// Tinted fill for "off" status pills.
+    pub neutral_soft: Color,
 }
 
 /// Dark palette — refined deep navy/charcoal (original mockup colours).
@@ -57,27 +71,47 @@ pub static DARK: Palette = Palette {
     ok: Color::from_rgb(0.18, 0.82, 0.58),
     warn: Color::from_rgb(0.98, 0.74, 0.16),
     chip_bg: Color::from_rgb(0.07, 0.10, 0.14),
+    light: false,
+    shadow: Color::from_rgba(0.0, 0.0, 0.0, 0.45),
+    backdrop: Color::from_rgba(0.01, 0.03, 0.06, 0.62),
+    overlay: Color::from_rgb(0.11, 0.15, 0.20),
+    danger_soft: Color::from_rgb(0.24, 0.14, 0.17),
+    ok_soft: Color::from_rgb(0.08, 0.20, 0.16),
+    neutral_soft: Color::from_rgb(0.12, 0.15, 0.19),
 };
 
-/// Light palette — soft warm white surface with the same blue accent.
+/// Light palette — cool off-white window, white cards, one blue accent.
+///
+/// Layering (lightest to darkest): `surface` white cards, `bg` window,
+/// `chip_bg` inset fields, `elevated` hover fill. Text colors are chosen to
+/// keep at least 4.5:1 contrast on `bg` and white (`faint`, used for
+/// placeholders and idle icons, keeps 3.5:1). `light_palette_text_is_readable`
+/// guards these ratios.
 pub static LIGHT: Palette = Palette {
-    bg: Color::from_rgb(0.97, 0.97, 0.98),
-    sidebar: Color::from_rgb(0.94, 0.95, 0.96),
+    bg: Color::from_rgb(0.965, 0.970, 0.978),
+    sidebar: Color::from_rgb(0.930, 0.940, 0.955),
     surface: Color::from_rgb(1.0, 1.0, 1.0),
-    elevated: Color::from_rgb(0.93, 0.94, 0.96),
-    border: Color::from_rgba(0.55, 0.60, 0.67, 0.40),
-    window_border: Color::from_rgba(0.45, 0.52, 0.60, 0.45),
-    border_subtle: Color::from_rgba(0.50, 0.55, 0.62, 0.30),
+    elevated: Color::from_rgb(0.905, 0.920, 0.943),
+    border: Color::from_rgba(0.48, 0.54, 0.63, 0.42),
+    window_border: Color::from_rgba(0.40, 0.47, 0.56, 0.50),
+    border_subtle: Color::from_rgba(0.50, 0.56, 0.64, 0.30),
     ink: Color::from_rgb(0.10, 0.12, 0.16),
-    muted: Color::from_rgb(0.42, 0.46, 0.52),
-    faint: Color::from_rgb(0.58, 0.62, 0.68),
-    accent: Color::from_rgb(0.16, 0.46, 0.94),
-    accent_soft: Color::from_rgb(0.88, 0.93, 0.99),
+    muted: Color::from_rgb(0.37, 0.42, 0.49),
+    faint: Color::from_rgb(0.45, 0.50, 0.57),
+    accent: Color::from_rgb(0.13, 0.41, 0.88),
+    accent_soft: Color::from_rgb(0.87, 0.92, 0.99),
     accent_border: Color::from_rgb(0.22, 0.52, 0.96),
-    danger: Color::from_rgb(0.86, 0.30, 0.30),
-    ok: Color::from_rgb(0.12, 0.64, 0.42),
-    warn: Color::from_rgb(0.82, 0.58, 0.08),
-    chip_bg: Color::from_rgb(0.92, 0.93, 0.95),
+    danger: Color::from_rgb(0.78, 0.20, 0.20),
+    ok: Color::from_rgb(0.05, 0.47, 0.30),
+    warn: Color::from_rgb(0.60, 0.38, 0.02),
+    chip_bg: Color::from_rgb(0.938, 0.946, 0.962),
+    light: true,
+    shadow: Color::from_rgba(0.10, 0.14, 0.22, 0.20),
+    backdrop: Color::from_rgba(0.10, 0.13, 0.20, 0.38),
+    overlay: Color::from_rgb(1.0, 1.0, 1.0),
+    danger_soft: Color::from_rgb(0.99, 0.91, 0.91),
+    ok_soft: Color::from_rgb(0.87, 0.96, 0.92),
+    neutral_soft: Color::from_rgb(0.92, 0.93, 0.95),
 };
 
 thread_local! {
@@ -149,10 +183,20 @@ pub fn WARN() -> Color {
 pub fn CHIP_BG() -> Color {
     palette().chip_bg
 }
+pub fn is_light() -> bool {
+    palette().light
+}
+pub fn OK_SOFT() -> Color {
+    palette().ok_soft
+}
+pub fn NEUTRAL_SOFT() -> Color {
+    palette().neutral_soft
+}
 /// Text and icons drawn on a solid `ACCENT()` background; identical in both palettes.
 pub fn ON_ACCENT() -> Color {
-    Color::from_rgb(0.97, 0.98, 1.0)
+    ON_ACCENT_COLOR
 }
+const ON_ACCENT_COLOR: Color = Color::from_rgb(0.97, 0.98, 1.0);
 
 // ---------------------------------------------------------------------------
 // Primitives
@@ -236,7 +280,7 @@ pub fn panel_style(_t: &Theme) -> container::Style {
 
 pub fn modal_backdrop_style(_t: &Theme) -> container::Style {
     container::Style {
-        background: Some(bg(Color::from_rgba(0.01, 0.03, 0.06, 0.62))),
+        background: Some(bg(palette().backdrop)),
         ..Default::default()
     }
 }
@@ -418,12 +462,13 @@ pub fn action_button(_t: &Theme, status: button::Status) -> button::Style {
 }
 
 pub fn context_menu_panel(_t: &Theme) -> container::Style {
+    let p = palette();
     container::Style {
-        background: Some(bg(ELEVATED())),
+        background: Some(bg(p.overlay)),
         text_color: Some(INK()),
         border: stroke(WINDOW_BORDER(), 1.0, 9.0),
         shadow: iced::Shadow {
-            color: Color::from_rgba(0.0, 0.0, 0.0, 0.45),
+            color: p.shadow,
             offset: iced::Vector::new(0.0, 8.0),
             blur_radius: 18.0,
         },
@@ -434,7 +479,7 @@ pub fn context_menu_item(danger: bool) -> impl Fn(&Theme, button::Status) -> but
     move |_t, status| button::Style {
         background: match status {
             button::Status::Hovered => Some(bg(if danger {
-                Color::from_rgb(0.24, 0.14, 0.17)
+                palette().danger_soft
             } else {
                 ACCENT_SOFT()
             })),
@@ -612,7 +657,7 @@ pub fn sort_picker(_theme: &Theme, status: pick_list::Status) -> pick_list::Styl
 
 pub fn sort_menu(_theme: &Theme) -> overlay::menu::Style {
     overlay::menu::Style {
-        background: bg(ELEVATED()),
+        background: bg(palette().overlay),
         border: stroke(BORDER(), 1.0, 8.0),
         text_color: INK(),
         selected_text_color: INK(),
@@ -715,7 +760,12 @@ pub fn chip_container(_t: &Theme) -> container::Style {
 
 pub fn scroll_style(_t: &Theme, status: scrollable::Status) -> scrollable::Style {
     let thumb = if matches!(status, scrollable::Status::Active) {
-        BORDER()
+        if is_light() {
+            // BORDER is too faint to find on a white list.
+            Color { a: 0.40, ..MUTED() }
+        } else {
+            BORDER()
+        }
     } else {
         MUTED()
     };
@@ -862,7 +912,7 @@ where
         .height(Length::Fixed(10.0))
         .style(move |_t: &Theme| container::Style {
             background: Some(bg(color)),
-            border: stroke(Color::from_rgb(0.40, 0.70, 1.0), 1.5, 5.0),
+            border: stroke(ACCENT_BORDER(), 1.5, 5.0),
             ..Default::default()
         })
 }
@@ -887,4 +937,61 @@ where
         border: stroke(BORDER(), 1.0, 5.0),
         ..Default::default()
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn luminance(c: Color) -> f32 {
+        let lin = |v: f32| {
+            if v <= 0.03928 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * lin(c.r) + 0.7152 * lin(c.g) + 0.0722 * lin(c.b)
+    }
+
+    fn contrast(a: Color, b: Color) -> f32 {
+        let (hi, lo) = {
+            let (x, y) = (luminance(a), luminance(b));
+            if x > y {
+                (x, y)
+            } else {
+                (y, x)
+            }
+        };
+        (hi + 0.05) / (lo + 0.05)
+    }
+
+    #[test]
+    fn light_palette_text_is_readable() {
+        let p = &LIGHT;
+        for ground in [p.bg, p.surface] {
+            for (name, fg) in [
+                ("ink", p.ink),
+                ("muted", p.muted),
+                ("danger", p.danger),
+                ("ok", p.ok),
+                ("warn", p.warn),
+                ("accent", p.accent),
+            ] {
+                assert!(contrast(fg, ground) >= 4.5, "{name} on {ground:?}");
+            }
+            assert!(contrast(p.faint, ground) >= 3.5, "faint on {ground:?}");
+        }
+        assert!(contrast(p.faint, p.chip_bg) >= 3.4, "placeholder in a field");
+        assert!(contrast(ON_ACCENT_COLOR, p.accent) >= 4.5, "label on accent");
+    }
+
+    #[test]
+    fn light_layers_are_distinguishable() {
+        let p = &LIGHT;
+        assert!(luminance(p.surface) > luminance(p.bg));
+        assert!(luminance(p.bg) > luminance(p.chip_bg));
+        assert!(luminance(p.chip_bg) > luminance(p.elevated));
+        assert!(p.light && !DARK.light);
+    }
 }

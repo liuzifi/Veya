@@ -15,7 +15,8 @@ mod native {
         VIRTUAL_KEY, VK_CONTROL, VK_LWIN, VK_MENU, VK_RETURN, VK_RWIN, VK_SHIFT,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        GetForegroundWindow, GetWindowThreadProcessId, IsWindow, SetForegroundWindow,
+        GetClassNameW, GetForegroundWindow, GetWindowThreadProcessId, IsWindow,
+        SetForegroundWindow,
     };
 
     use super::PasteTarget;
@@ -36,6 +37,16 @@ mod native {
     pub fn capture_target() -> Option<PasteTarget> {
         let target = identity(unsafe { GetForegroundWindow() })?;
         (target.process_id != unsafe { GetCurrentProcessId() }).then_some(target)
+    }
+
+    pub fn capture_app_target() -> Option<PasteTarget> {
+        let hwnd = unsafe { GetForegroundWindow() };
+        let mut class = [0u16; 64];
+        let len = unsafe { GetClassNameW(hwnd, &mut class) };
+        if len > 0 && super::is_shell_surface_class(&String::from_utf16_lossy(&class[..len as usize])) {
+            return None;
+        }
+        capture_target()
     }
 
     fn validate(target: PasteTarget) -> Result<HWND, String> {
@@ -159,7 +170,23 @@ mod native {
 }
 
 #[cfg(windows)]
-pub use native::{capture_target, paste_to_target, restore_target};
+pub use native::{capture_app_target, capture_target, paste_to_target, restore_target};
+
+/// Like `capture_target`, but ignores the desktop and taskbar, which are never
+/// a useful paste destination. Used to follow the foreground app while the
+/// quick-paste panel stays pinned.
+#[cfg(not(windows))]
+pub fn capture_app_target() -> Option<PasteTarget> {
+    None
+}
+
+#[cfg(any(windows, test))]
+fn is_shell_surface_class(class: &str) -> bool {
+    matches!(
+        class,
+        "Shell_TrayWnd" | "Shell_SecondaryTrayWnd" | "Progman" | "WorkerW"
+    )
+}
 
 #[cfg(not(windows))]
 pub fn capture_target() -> Option<PasteTarget> {
@@ -252,6 +279,14 @@ mod tests {
         ));
         let null = PasteTarget { hwnd: 0, ..target };
         assert!(!same_external_target(null, Some(null), 1));
+    }
+
+    #[test]
+    fn desktop_and_taskbar_are_not_paste_targets() {
+        assert!(is_shell_surface_class("Shell_TrayWnd"));
+        assert!(is_shell_surface_class("Progman"));
+        assert!(is_shell_surface_class("WorkerW"));
+        assert!(!is_shell_surface_class("Notepad"));
     }
 
     #[test]

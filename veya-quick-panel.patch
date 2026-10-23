@@ -1,0 +1,841 @@
+--- a/docs/releases/v0.2.6.md
++++ b/docs/releases/v0.2.6.md
+@@ -7,6 +7,11 @@
+ - 快捷粘贴面板顶部新增分组标签行，可按分组过滤历史记录。右键菜单支持新建、重命名和删除分组。
+ - 分组存储在 SQLite 的 `card_group` 与 `card_group_member` 表中，固定记录加入分组后不会被自动清理移除。
+ - 分组过滤与搜索、类型筛选、固定筛选和时间排序可组合使用。
++- 快捷粘贴面板调整为紧凑行高，打开后可同时看到 10 条记录（屏幕高度不足时按工作区自动缩小）。
++- 选中某个分组时，右键菜单可将记录“从分组移除”；从右键菜单“新建分组…”会把当前记录直接放进新分组。
++- 分组名称不能为空、不能重名，出错时输入框保持打开并给出提示；Esc 只关闭名称输入框，窗口失去焦点仍会关闭面板。
++- 每次打开面板都从“全部”开始；分组很多时标签行可横向滚动，右键菜单过长时可滚动。
++- 同一内容连续复制多次后，加入分组的记录不会再从该分组里消失。
+ 
+ ## 瀑布式无限滚动
+ 
+--- a/veya-desktop/src/app/history.rs
++++ b/veya-desktop/src/app/history.rs
+@@ -385,7 +385,11 @@
+         )
+         .on_press(Message::CloseCardMenu)
+         .on_right_press(Message::CloseCardMenu);
+-        let origin = card_menu_origin(position, self.window_size);
++        let origin = card_menu_origin(
++            position,
++            self.window_size,
++            iced::Size::new(170.0, MANAGER_CARD_MENU_HEIGHT),
++        );
+         let positioned = container(menu)
+             .width(Length::Fill)
+             .height(Length::Fill)
+@@ -403,11 +407,17 @@
+     }
+ }
+ 
+-pub(super) fn card_menu_origin(cursor: iced::Point, window: iced::Size) -> iced::Point {
+-    const MENU_WIDTH: f32 = 170.0;
+-    const MENU_HEIGHT: f32 = 82.0;
+-    let max_x = (window.width - MENU_WIDTH - 8.0).max(0.0);
+-    let max_y = (window.height - MENU_HEIGHT - 8.0).max(0.0);
++/// Height of the manager's two-item card menu.
++const MANAGER_CARD_MENU_HEIGHT: f32 = 82.0;
++
++/// Top-left corner for a card menu opened at `cursor`, kept inside the window.
++pub(super) fn card_menu_origin(
++    cursor: iced::Point,
++    window: iced::Size,
++    menu: iced::Size,
++) -> iced::Point {
++    let max_x = (window.width - menu.width - 8.0).max(0.0);
++    let max_y = (window.height - menu.height - 8.0).max(0.0);
+     iced::Point::new(cursor.x.clamp(0.0, max_x), cursor.y.clamp(0.0, max_y))
+ }
+ 
+--- a/veya-desktop/src/app/quick.rs
++++ b/veya-desktop/src/app/quick.rs
+@@ -4,8 +4,15 @@
+ use iced::widget::column;
+ 
+ const QUICK_WIDTH: f32 = 440.0;
+-const QUICK_HEIGHT: f32 = 580.0;
+-const ROW_HEIGHT: f32 = 64.0;
++/// History rows that are fully visible when the picker opens (on a screen tall enough).
++const QUICK_VISIBLE_ROWS: usize = 10;
++const ROW_HEIGHT: f32 = 52.0;
++/// Everything in the picker except the list: header, search box, group tabs, dividers,
++/// footer and padding. Slightly generous, so ten full rows fit even with larger fonts.
++const QUICK_CHROME_HEIGHT: f32 = 204.0;
++const QUICK_HEIGHT: f32 = QUICK_VISIBLE_ROWS as f32 * ROW_HEIGHT + QUICK_CHROME_HEIGHT;
++const QUICK_MENU_WIDTH: f32 = 200.0;
++const QUICK_MENU_ITEM_HEIGHT: f32 = 34.0;
+ /// Rows from the end of the loaded list at which keyboard navigation loads the next page.
+ const LOAD_MORE_LOOKAHEAD: usize = 5;
+ 
+@@ -89,6 +96,9 @@
+         self.pinned_only = false;
+         self.sort_order = SortOrder::Newest;
+         self.history_page = 0;
++        // Every opening starts on "全部" with no half-finished group edit.
++        self.quick_group_sel = None;
++        self.quick_group_input = None;
+         self.page = Page::History;
+         self.detail_menu_open = false;
+         self.card_menu = None;
+@@ -171,6 +181,7 @@
+             return Task::none();
+         }
+         let target = quick.target;
++        self.quick_group_input = None;
+         let generation = self.advance_window_generation();
+         let size = self.restore_management_state();
+         self.window_hidden = true;
+@@ -357,6 +368,33 @@
+         }
+     }
+ 
++    /// Show (or clear) a warning line under the list of the quick picker.
++    pub(super) fn set_quick_error(&mut self, error: Option<String>) {
++        if let Some(quick) = &mut self.quick {
++            quick.error = error;
++        }
++    }
++
++    /// Why `name` cannot be used for a group, if it cannot.
++    pub(super) fn group_name_problem(
++        &self,
++        name: &str,
++        mode: QuickGroupInputMode,
++    ) -> Option<String> {
++        if name.is_empty() {
++            return Some("分组名称不能为空".into());
++        }
++        let renamed = match mode {
++            QuickGroupInputMode::Rename { id } => Some(id),
++            QuickGroupInputMode::Create { .. } => None,
++        };
++        self.state
++            .groups
++            .iter()
++            .any(|group| group.name == name && Some(group.id) != renamed)
++            .then(|| "分组名称已存在".to_string())
++    }
++
+     pub(super) fn quick_move(&mut self, delta: i32) -> Task<Message> {
+         if self.quick.as_ref().is_none_or(|quick| quick.busy()) || self.history_list_pending() {
+             return Task::none();
+@@ -372,7 +410,7 @@
+             self.request_history_load_more();
+         }
+         // Each row has a fixed height; keep the keyboard selection in view.
+-        let viewport = (self.window_size.height - 170.0).max(ROW_HEIGHT);
++        let viewport = (self.window_size.height - QUICK_CHROME_HEIGHT).max(ROW_HEIGHT);
+         let content = sequences.len() as f32 * ROW_HEIGHT;
+         let overflow = (content - viewport).max(1.0);
+         let offset =
+@@ -482,14 +520,14 @@
+                     metadata = metadata.push(icons::icon(Icon::Pin, theme::ACCENT(), 11.0));
+                 }
+                 let content = row![
+-                    history::card_leading_visual(card, 34.0),
++                    history::card_leading_visual(card, 32.0),
+                     column![
+                         body(compact_preview(&card.content_preview, 46))
+                             .size(13)
+                             .shaping(text::Shaping::Advanced),
+                         metadata
+                     ]
+-                    .spacing(5)
++                    .spacing(3)
+                     .width(Length::Fill),
+                 ]
+                 .spacing(10)
+@@ -497,7 +535,7 @@
+                 let row = button(content)
+                     .width(Length::Fill)
+                     .height(ROW_HEIGHT)
+-                    .padding(10)
++                    .padding(8)
+                     .style(theme::card_button(
+                         self.state.selected == Some(card.sequence),
+                     ));
+@@ -584,64 +622,119 @@
+         )
+         .padding(pad(4.0, 8.0, 4.0, 8.0))
+         .style(theme::ghost_button)
+-        .on_press(Message::QuickStartCreateGroup);
++        .on_press(Message::QuickStartCreateGroup { add_sequence: None });
+         tabs.push(add.into());
+         let mut row = row![].spacing(6).align_y(Alignment::Center);
+         for tab in tabs {
+             row = row.push(tab);
+         }
+-        scrollable(row)
+-            .width(Length::Fill)
+-            .height(Length::Shrink)
+-            .style(theme::scroll_style)
+-            .into()
++        // Many groups overflow the width: scroll the row sideways (a vertical scrollable
++        // would clip them with no way to reach the rest).
++        scrollable(row.padding(iced::Padding {
++            top: 0.0,
++            right: 0.0,
++            bottom: 8.0,
++            left: 0.0,
++        }))
++        .direction(scrollable::Direction::Horizontal(
++            scrollable::Scrollbar::new().width(4).scroller_width(4),
++        ))
++        .width(Length::Fill)
++        .height(Length::Shrink)
++        .style(theme::scroll_style)
++        .into()
+     }
+ 
+     /// Right-click context menu for a card inside the quick picker.
+-    /// Lists every existing group (toggle add/remove) plus a "新建分组" entry.
++    ///
++    /// While a group tab is selected the first entry removes the card from that group;
++    /// the other groups can be added to, and "新建分组…" creates a group holding the card.
+     fn quick_card_menu(&self, card: &CardView, position: iced::Point) -> Element<'_, Message> {
+-        let mut items: Vec<Element<'_, Message>> = Vec::new();
+-        for group in self.state.groups.iter() {
+-            let label = format!("添加到「{}」", group.name);
+-            let item = button(
++        let menu_item = |icon: Icon, label: String, message: Message| {
++            button(
+                 row![
+-                    icons::icon(Icon::Pin, theme::MUTED(), 14.0),
+-                    text(label).size(12),
++                    icons::icon(icon, theme::MUTED(), 14.0),
++                    text(label).size(12).wrapping(text::Wrapping::None),
+                 ]
+                 .spacing(9)
+                 .align_y(Alignment::Center),
+             )
+             .width(Length::Fill)
+             .padding(pad(8.0, 10.0, 8.0, 10.0))
+-            .on_press(Message::QuickAddToGroup {
+-                group_id: group.id,
+-                sequence: card.sequence,
+-            })
+-            .style(theme::context_menu_item(false));
+-            items.push(item.into());
+-        }
+-        let new_group = button(
+-            row![
+-                icons::icon(Icon::Plus, theme::MUTED(), 14.0),
+-                text("新建分组…").size(12),
+-            ]
+-            .spacing(9)
+-            .align_y(Alignment::Center),
+-        )
+-        .width(Length::Fill)
+-        .padding(pad(8.0, 10.0, 8.0, 10.0))
+-        .on_press(Message::QuickStartCreateGroup)
+-        .style(theme::context_menu_item(false));
+-        items.push(new_group.into());
++            .on_press(message)
++            .style(theme::context_menu_item(false))
++        };
++        let mut items: Vec<Element<'_, Message>> = Vec::new();
++        if let Some(current) = self
++            .quick_group_sel
++            .and_then(|id| self.state.groups.iter().find(|group| group.id == id))
++        {
++            items.push(
++                menu_item(
++                    Icon::Close,
++                    format!("从「{}」移除", current.name),
++                    Message::QuickRemoveFromGroup {
++                        group_id: current.id,
++                        sequence: card.sequence,
++                    },
++                )
++                .into(),
++            );
++        }
++        for group in self
++            .state
++            .groups
++            .iter()
++            .filter(|group| Some(group.id) != self.quick_group_sel)
++        {
++            items.push(
++                menu_item(
++                    Icon::Pin,
++                    format!("添加到「{}」", group.name),
++                    Message::QuickAddToGroup {
++                        group_id: group.id,
++                        sequence: card.sequence,
++                    },
++                )
++                .into(),
++            );
++        }
++        items.push(
++            menu_item(
++                Icon::Plus,
++                "新建分组…".to_string(),
++                Message::QuickStartCreateGroup {
++                    add_sequence: Some(card.sequence),
++                },
++            )
++            .into(),
++        );
++        // Size the menu from its entries so it can be kept inside the window, and let it
++        // scroll when there are more groups than fit.
++        let content_height = quick_menu_content_height(items.len());
++        let max_height = (self.window_size.height - 16.0).max(QUICK_MENU_ITEM_HEIGHT + 8.0);
++        let menu_height = content_height.min(max_height);
++        let list: Element<'_, Message> = if content_height > menu_height {
++            scrollable(column(items).spacing(2))
++                .height(Length::Fixed(menu_height - 8.0))
++                .style(theme::scroll_style)
++                .into()
++        } else {
++            column(items).spacing(2).into()
++        };
+         let menu = mouse_area(
+-            container(column(items).spacing(2))
+-                .width(Length::Fixed(180.0))
++            container(list)
++                .width(Length::Fixed(QUICK_MENU_WIDTH))
+                 .padding(4)
+                 .style(theme::context_menu_panel),
+         )
+         .on_press(Message::QuickCloseCardMenu)
+         .on_right_press(Message::QuickCloseCardMenu);
+-        let origin = card_menu_origin(position, self.window_size);
++        let origin = card_menu_origin(
++            position,
++            self.window_size,
++            iced::Size::new(QUICK_MENU_WIDTH, menu_height),
++        );
+         let positioned = container(menu)
+             .width(Length::Fill)
+             .height(Length::Fill)
+@@ -659,6 +752,12 @@
+     }
+ }
+ 
++/// Height of a card menu with `items` entries, including its padding.
++fn quick_menu_content_height(items: usize) -> f32 {
++    let items = items as f32;
++    items * QUICK_MENU_ITEM_HEIGHT + (items - 1.0).max(0.0) * 2.0 + 8.0
++}
++
+ fn quick_scroll_id() -> scrollable::Id {
+     scrollable::Id::new("quick-history")
+ }
+@@ -904,6 +1003,187 @@
+         }
+     }
+ 
++    fn group(id: i64, name: &str) -> veya_storage::GroupSummary {
++        veya_storage::GroupSummary {
++            id,
++            name: name.into(),
++            member_count: 0,
++        }
++    }
++
++    #[test]
++    fn picker_has_room_for_ten_rows_above_the_fixed_chrome() {
++        assert!(QUICK_HEIGHT - QUICK_CHROME_HEIGHT >= QUICK_VISIBLE_ROWS as f32 * ROW_HEIGHT);
++        assert_eq!(QUICK_VISIBLE_ROWS, 10);
++    }
++
++    #[test]
++    fn opening_the_picker_starts_on_all_groups_without_a_half_finished_edit() {
++        let (mut app, _rx) = ready_text_app();
++        app.state.groups = vec![group(1, "work")];
++        app.quick_group_sel = Some(1);
++        app.quick_group_input = Some(QuickGroupInput {
++            mode: QuickGroupInputMode::Create { add_sequence: None },
++            value: "half".into(),
++        });
++        let _ = app.show_quick(None);
++        assert_eq!(app.quick_group_sel, None);
++        assert!(app.quick_group_input.is_none());
++        assert_eq!(app.history_query().group_id, None);
++    }
++
++    #[test]
++    fn escape_only_closes_the_group_name_box() {
++        let (mut app, _rx) = ready_text_app();
++        let _ = app.show_quick(None);
++        let _ = app.update(Message::QuickStartCreateGroup { add_sequence: None });
++        assert!(app.quick_group_input.is_some());
++        let _ = app.update(Message::QuickDismiss { restore: true });
++        assert!(app.quick_group_input.is_none());
++        assert!(app.quick.is_some(), "the picker itself stays open");
++        assert!(!app.window_hidden);
++    }
++
++    #[test]
++    fn losing_focus_still_dismisses_the_picker_while_naming_a_group() {
++        let (mut app, _rx) = ready_text_app();
++        let _ = app.show_quick(None);
++        let _ = app.update(Message::QuickStartCreateGroup { add_sequence: None });
++        let _ = app.update(Message::QuickDismiss { restore: false });
++        assert!(
++            app.window_hidden,
++            "an unfocused picker must not stay on screen"
++        );
++        assert!(app.quick_group_input.is_none());
++    }
++
++    #[test]
++    fn group_names_must_be_non_empty_and_unique_and_the_box_stays_open_on_error() {
++        let (mut app, rx) = ready_text_app();
++        app.state.groups = vec![group(1, "work"), group(2, "links")];
++        let _ = app.show_quick(None);
++        while rx.try_recv().is_ok() {} // drop the history query sent by opening the picker
++
++        let _ = app.update(Message::QuickStartCreateGroup {
++            add_sequence: Some(7),
++        });
++        let _ = app.update(Message::QuickGroupInputChanged("   ".into()));
++        let _ = app.update(Message::QuickGroupInputSubmit);
++        assert!(app.quick_group_input.is_some());
++        assert!(rx.try_recv().is_err());
++        assert_eq!(
++            app.quick.as_ref().unwrap().error.as_deref(),
++            Some("分组名称不能为空")
++        );
++
++        let _ = app.update(Message::QuickGroupInputChanged("work".into()));
++        assert!(
++            app.quick.as_ref().unwrap().error.is_none(),
++            "typing clears the warning"
++        );
++        let _ = app.update(Message::QuickGroupInputSubmit);
++        assert!(app.quick_group_input.is_some());
++        assert!(rx.try_recv().is_err());
++        assert_eq!(
++            app.quick.as_ref().unwrap().error.as_deref(),
++            Some("分组名称已存在")
++        );
++
++        let _ = app.update(Message::QuickGroupInputChanged("  ideas ".into()));
++        let _ = app.update(Message::QuickGroupInputSubmit);
++        assert!(app.quick_group_input.is_none());
++        match rx.try_recv() {
++            Ok(WorkerCmd::CreateGroup { name, add_sequence }) => {
++                assert_eq!(name, "ideas");
++                assert_eq!(
++                    add_sequence,
++                    Some(7),
++                    "the card that opened the menu joins the group"
++                );
++            }
++            _ => panic!("expected the group to be created"),
++        }
++    }
++
++    #[test]
++    fn renaming_a_group_to_its_own_name_is_allowed() {
++        let (mut app, rx) = ready_text_app();
++        app.state.groups = vec![group(1, "work"), group(2, "links")];
++        let _ = app.show_quick(None);
++        while rx.try_recv().is_ok() {} // drop the history query sent by opening the picker
++        let _ = app.update(Message::QuickStartRenameGroup(1));
++        let _ = app.update(Message::QuickGroupInputSubmit);
++        assert!(app.quick_group_input.is_none());
++        match rx.try_recv() {
++            Ok(WorkerCmd::RenameGroup { id, name }) => {
++                assert_eq!((id, name.as_str()), (1, "work"));
++            }
++            _ => panic!("expected a rename"),
++        }
++        let _ = app.update(Message::QuickStartRenameGroup(1));
++        let _ = app.update(Message::QuickGroupInputChanged("links".into()));
++        let _ = app.update(Message::QuickGroupInputSubmit);
++        assert!(
++            app.quick_group_input.is_some(),
++            "another group already has that name"
++        );
++    }
++
++    #[test]
++    fn deleting_a_group_closes_its_rename_box_and_leaves_its_tab() {
++        let (mut app, rx) = ready_text_app();
++        app.state.groups = vec![group(1, "work")];
++        let _ = app.show_quick(None);
++        let _ = app.update(Message::QuickSelectGroup(Some(1)));
++        let _ = app.update(Message::QuickStartRenameGroup(1));
++        let _ = app.update(Message::QuickDeleteGroup(1));
++        assert!(app.quick_group_input.is_none());
++        assert_eq!(app.quick_group_sel, None);
++        let mut deleted = false;
++        while let Ok(command) = rx.try_recv() {
++            deleted |= matches!(command, WorkerCmd::DeleteGroup { id: 1 });
++        }
++        assert!(deleted);
++    }
++
++    #[test]
++    fn removing_a_card_from_a_group_removes_every_record_it_stands_for() {
++        let (mut app, rx) = ready_text_app();
++        let mut cards = app.state.cards.to_vec();
++        cards[0].raw_sequences = vec![1, 2, 3];
++        app.state.cards = cards.into();
++        let _ = app.update(Message::QuickRemoveFromGroup {
++            group_id: 5,
++            sequence: 1,
++        });
++        match rx.try_recv() {
++            Ok(WorkerCmd::RemoveFromGroup {
++                group_id,
++                sequences,
++            }) => {
++                assert_eq!(group_id, 5);
++                assert_eq!(sequences, vec![1, 2, 3]);
++            }
++            _ => panic!("expected the removal"),
++        }
++    }
++
++    #[test]
++    fn card_menu_stays_inside_the_window_however_many_groups_there_are() {
++        let window = iced::Size::new(QUICK_WIDTH, QUICK_HEIGHT);
++        for items in [1usize, 3, 12, 40] {
++            let content = quick_menu_content_height(items);
++            let height = content.min((window.height - 16.0).max(QUICK_MENU_ITEM_HEIGHT + 8.0));
++            let origin = card_menu_origin(
++                iced::Point::new(window.width, window.height),
++                window,
++                iced::Size::new(QUICK_MENU_WIDTH, height),
++            );
++            assert!(origin.x + QUICK_MENU_WIDTH <= window.width);
++            assert!(origin.y + height <= window.height);
++        }
++    }
++
+     #[test]
+     fn hidden_quick_dismissal_can_render_before_the_window_resizes() {
+         let (mut app, _) = ready_text_app();
+--- a/veya-desktop/src/app.rs
++++ b/veya-desktop/src/app.rs
+@@ -295,8 +295,13 @@
+ 
+ #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+ enum QuickGroupInputMode {
+-    Create,
+-    Rename { id: i64 },
++    /// `add_sequence` is the card whose menu started the creation; it joins the new group.
++    Create {
++        add_sequence: Option<u32>,
++    },
++    Rename {
++        id: i64,
++    },
+ }
+ 
+ #[derive(Debug, Clone)]
+@@ -304,7 +309,9 @@
+     QuickMove(i32),
+     QuickPaste(u32),
+     QuickSelectGroup(Option<i64>),
+-    QuickStartCreateGroup,
++    QuickStartCreateGroup {
++        add_sequence: Option<u32>,
++    },
+     QuickStartRenameGroup(i64),
+     QuickGroupInputChanged(String),
+     QuickGroupInputSubmit,
+@@ -689,7 +696,8 @@
+         let message = if self.quick_group_input.is_some() {
+             match message {
+                 Message::RecopySelected => Message::QuickGroupInputSubmit,
+-                Message::QuickDismiss { .. } => Message::QuickGroupInputCancel,
++                // Escape only closes the name box; losing focus still dismisses the picker.
++                Message::QuickDismiss { restore: true } => Message::QuickGroupInputCancel,
+                 Message::QuickMove(_) => Message::QuickCloseCardMenu,
+                 other => other,
+             }
+@@ -702,11 +710,14 @@
+             Message::QuickDismiss { restore } => self.dismiss_quick(restore),
+             Message::QuickSelectGroup(group_id) => {
+                 self.quick_group_sel = group_id;
++                self.quick_group_input = None;
++                self.set_quick_error(None);
+                 self.request_history_query(true)
+             }
+-            Message::QuickStartCreateGroup => {
++            Message::QuickStartCreateGroup { add_sequence } => {
++                self.set_quick_error(None);
+                 self.quick_group_input = Some(QuickGroupInput {
+-                    mode: QuickGroupInputMode::Create,
++                    mode: QuickGroupInputMode::Create { add_sequence },
+                     value: String::new(),
+                 });
+                 Task::none()
+@@ -719,6 +730,7 @@
+                     .find(|g| g.id == id)
+                     .map(|g| g.name.clone())
+                     .unwrap_or_default();
++                self.set_quick_error(None);
+                 self.quick_group_input = Some(QuickGroupInput {
+                     mode: QuickGroupInputMode::Rename { id },
+                     value,
+@@ -729,33 +741,44 @@
+                 if let Some(input) = self.quick_group_input.as_mut() {
+                     input.value = value;
+                 }
++                self.set_quick_error(None);
+                 Task::none()
+             }
+             Message::QuickGroupInputSubmit => {
+-                if let Some(input) = self.quick_group_input.take() {
+-                    let name = input.value.trim().to_owned();
+-                    if name.is_empty() {
+-                        self.state.status_note = "分组名称不能为空".into();
+-                    } else {
+-                        match input.mode {
+-                            QuickGroupInputMode::Create => {
+-                                let _ = self.worker.cmd_tx.send(WorkerCmd::CreateGroup { name });
+-                            }
+-                            QuickGroupInputMode::Rename { id } => {
+-                                let _ =
+-                                    self.worker.cmd_tx.send(WorkerCmd::RenameGroup { id, name });
+-                            }
+-                        }
++                let Some(input) = self.quick_group_input.clone() else {
++                    return Task::none();
++                };
++                let name = input.value.trim().to_owned();
++                if let Some(problem) = self.group_name_problem(&name, input.mode) {
++                    // Keep the box open so the name can be corrected.
++                    self.set_quick_error(Some(problem));
++                    return Task::none();
++                }
++                self.quick_group_input = None;
++                self.set_quick_error(None);
++                match input.mode {
++                    QuickGroupInputMode::Create { add_sequence } => {
++                        let _ = self
++                            .worker
++                            .cmd_tx
++                            .send(WorkerCmd::CreateGroup { name, add_sequence });
++                    }
++                    QuickGroupInputMode::Rename { id } => {
++                        let _ = self.worker.cmd_tx.send(WorkerCmd::RenameGroup { id, name });
+                     }
+                 }
+                 Task::none()
+             }
+             Message::QuickGroupInputCancel => {
+                 self.quick_group_input = None;
++                self.set_quick_error(None);
+                 Task::none()
+             }
+             Message::QuickDeleteGroup(id) => {
+                 let _ = self.worker.cmd_tx.send(WorkerCmd::DeleteGroup { id });
++                // The rename box belongs to the group that is going away.
++                self.quick_group_input = None;
++                self.set_quick_error(None);
+                 if self.quick_group_sel == Some(id) {
+                     self.quick_group_sel = None;
+                     return self.request_history_query(true);
+@@ -779,10 +802,19 @@
+                 Task::none()
+             }
+             Message::QuickRemoveFromGroup { group_id, sequence } => {
+-                let _ = self
+-                    .worker
+-                    .cmd_tx
+-                    .send(WorkerCmd::RemoveFromGroup { group_id, sequence });
++                // A card can stand for several identical copies; the group may hold any of
++                // them, so remove all of the card's records from the group.
++                let sequences = self
++                    .state
++                    .cards
++                    .iter()
++                    .find(|card| card.sequence == sequence)
++                    .map(|card| card.raw_sequences.clone())
++                    .unwrap_or_else(|| vec![sequence]);
++                let _ = self.worker.cmd_tx.send(WorkerCmd::RemoveFromGroup {
++                    group_id,
++                    sequences,
++                });
+                 self.card_menu = None;
+                 Task::none()
+             }
+--- a/veya-desktop/src/history_loader.rs
++++ b/veya-desktop/src/history_loader.rs
+@@ -410,7 +410,13 @@
+     };
+     let mut consume = |summary: HistorySummary| {
+         if let Some(members) = &group_members {
+-            if !members.contains(&i64::from(summary.representative.sequence)) {
++            // A card stands for consecutive identical copies, and the group may hold any
++            // of them (the newest copy only becomes the representative later).
++            if !summary
++                .raw_sequences
++                .iter()
++                .any(|sequence| members.contains(&i64::from(*sequence)))
++            {
+                 return false;
+             }
+         }
+--- a/veya-desktop/src/worker.rs
++++ b/veya-desktop/src/worker.rs
+@@ -25,25 +25,59 @@
+ const HISTORY_READ_BATCH: usize = 16;
+ 
+ pub enum WorkerCmd {
+-    Recopy { sequence: u32 },
+-    PreparePaste { sequence: u32, request_id: u64 },
+-    RecopyPlainText { sequence: u32 },
++    Recopy {
++        sequence: u32,
++    },
++    PreparePaste {
++        sequence: u32,
++        request_id: u64,
++    },
++    RecopyPlainText {
++        sequence: u32,
++    },
+     LoadContent(u32),
+     UnloadContent,
+     ClearHistory,
+-    SetTracking { on: bool, request_id: Option<u64> },
++    SetTracking {
++        on: bool,
++        request_id: Option<u64>,
++    },
+     SetThemeMode(ThemeMode),
+     SetMaxItems(MaxItemsConfig),
+     SetExpiry(ExpiryConfig),
+-    CreateGroup { name: String },
+-    RenameGroup { id: i64, name: String },
+-    DeleteGroup { id: i64 },
+-    AddToGroup { group_id: i64, sequence: u32 },
+-    RemoveFromGroup { group_id: i64, sequence: u32 },
+-    ExcludeApp { exe: String },
+-    UnexcludeApp { exe: String },
+-    DeleteRecord { sequences: Vec<u32> },
+-    SetPinned { sequences: Vec<u32>, pinned: bool },
++    CreateGroup {
++        name: String,
++        /// Record to put into the new group right away (from a card's context menu).
++        add_sequence: Option<u32>,
++    },
++    RenameGroup {
++        id: i64,
++        name: String,
++    },
++    DeleteGroup {
++        id: i64,
++    },
++    AddToGroup {
++        group_id: i64,
++        sequence: u32,
++    },
++    RemoveFromGroup {
++        group_id: i64,
++        sequences: Vec<u32>,
++    },
++    ExcludeApp {
++        exe: String,
++    },
++    UnexcludeApp {
++        exe: String,
++    },
++    DeleteRecord {
++        sequences: Vec<u32>,
++    },
++    SetPinned {
++        sequences: Vec<u32>,
++        pinned: bool,
++    },
+     SetExpandedRaw(bool),
+     SetHotkey(Hotkey),
+     QueryHistory(HistoryQuery),
+@@ -867,13 +901,21 @@
+                             removed,
+                         );
+                     }
+-                    WorkerCmd::CreateGroup { name } => {
++                    WorkerCmd::CreateGroup { name, add_sequence } => {
+                         let name = name.trim();
+                         if name.is_empty() {
+                             status_note = "分组名称不能为空".into();
+                         } else {
+                             status_note = match store.create_group(name, now_ms()) {
+-                                Ok(_) => format!("已创建分组「{name}」"),
++                                Ok(group_id) => {
++                                    if let Some(sequence) = add_sequence {
++                                        let _ =
++                                            store.add_group_member(group_id, sequence, now_ms());
++                                        format!("已创建分组「{name}」并加入当前记录")
++                                    } else {
++                                        format!("已创建分组「{name}」")
++                                    }
++                                }
+                                 Err(error) => {
+                                     if error.to_string().contains("UNIQUE") {
+                                         "分组名称已存在".into()
+@@ -923,8 +965,16 @@
+                             Err(error) => format!("加入分组失败：{error}"),
+                         };
+                     }
+-                    WorkerCmd::RemoveFromGroup { group_id, sequence } => {
+-                        status_note = match store.remove_group_member(group_id, sequence) {
++                    WorkerCmd::RemoveFromGroup {
++                        group_id,
++                        sequences,
++                    } => {
++                        let removed = sequences.iter().try_fold(0usize, |total, &sequence| {
++                            store
++                                .remove_group_member(group_id, sequence)
++                                .map(|count| total + count)
++                        });
++                        status_note = match removed {
+                             Ok(_) => {
+                                 if history_query.group_id == Some(group_id) {
+                                     history_page.invalidate();
+@@ -1194,6 +1244,42 @@
+         );
+     }
+ 
++    #[test]
++    fn group_view_keeps_a_card_whose_newest_copy_is_not_the_saved_one() {
++        let mut store = Store::open_in_memory().unwrap();
++        store.insert_record(&text_record(1, "same", 1_000)).unwrap();
++        store
++            .insert_record(&text_record(2, "other", 2_000))
++            .unwrap();
++        // The user groups the first "same", then copies the identical text again right
++        // after it; the newest copy (3) becomes the card's representative.
++        store.insert_record(&text_record(3, "same", 3_000)).unwrap();
++        store.insert_record(&text_record(4, "same", 4_000)).unwrap();
++        let group = store.create_group("keep", 1).unwrap();
++        store.add_group_member(group, 3, 1).unwrap();
++        let query = HistoryQuery {
++            group_id: Some(group),
++            ..HistoryQuery::default()
++        };
++        let (cards, _) = history_loader::load_page(&store, &query, false, &|| true)
++            .unwrap()
++            .unwrap();
++        assert_eq!(cards.len(), 1);
++        let mut raw = cards[0].raw_sequences.clone();
++        raw.sort_unstable();
++        assert_eq!(raw, vec![3, 4]);
++        // Another group sees nothing.
++        let empty = store.create_group("empty", 2).unwrap();
++        let query = HistoryQuery {
++            group_id: Some(empty),
++            ..HistoryQuery::default()
++        };
++        let (cards, _) = history_loader::load_page(&store, &query, false, &|| true)
++            .unwrap()
++            .unwrap();
++        assert!(cards.is_empty());
++    }
++
+     pub(super) fn text_record(sequence: u32, text: &str, created_at_ms: i64) -> ClipboardRecord {
+         let payload = ClipboardPayload::Text(text.to_string());
+         ClipboardRecord {

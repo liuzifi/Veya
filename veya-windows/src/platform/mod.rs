@@ -4,6 +4,7 @@
 pub mod chrome;
 #[cfg(windows)]
 pub mod clipboard;
+pub mod dialog;
 #[cfg(windows)]
 pub mod elevation;
 #[cfg(windows)]

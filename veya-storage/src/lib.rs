@@ -4,7 +4,7 @@
 
 use std::{collections::HashMap, fmt::Write as _, path::Path};
 
-use rusqlite::{params, types::Type, Connection, OptionalExtension};
+use rusqlite::{params, types::Type, Connection, DatabaseName, OptionalExtension};
 use veya_core::{
     ClipboardPayload, ClipboardRecord, HistoryPayload, HistoryRecord, PasteMethod,
     PasteTriggerRecord, SourceConfidence,
@@ -38,6 +38,14 @@ impl Thumbnail {
                 .and_then(|n| n.checked_mul(4))
                 .is_some_and(|n| n as usize == self.rgba.len())
     }
+}
+
+/// What a database backup file holds, shown before a restore is confirmed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackupInfo {
+    pub records: usize,
+    pub groups: usize,
+    pub size_bytes: u64,
 }
 
 pub struct Store {
@@ -173,6 +181,12 @@ impl Store {
             "#,
             params![key, value],
         )?;
+        Ok(())
+    }
+
+    pub fn remove_setting(&mut self, key: &str) -> rusqlite::Result<()> {
+        self.conn
+            .execute("DELETE FROM app_settings WHERE key = ?1", params![key])?;
         Ok(())
     }
 
@@ -825,6 +839,112 @@ impl Store {
         .optional()
         .ok()
         .flatten()
+    }
+
+    /// Write a consistent, compacted snapshot of the database at `source` to `dest`.
+    ///
+    /// Uses its own connection, so it can run while the application keeps writing. The
+    /// snapshot is written beside `dest`, verified, and only then moved into place, so a
+    /// failed backup never leaves a half-written or replaced destination file.
+    pub fn backup_file(
+        source: impl AsRef<Path>,
+        dest: impl AsRef<Path>,
+    ) -> Result<BackupInfo, String> {
+        let (source, dest) = (source.as_ref(), dest.as_ref());
+        if let (Ok(a), Ok(b)) = (source.canonicalize(), dest.canonicalize()) {
+            if a == b {
+                return Err("不能把备份保存为当前正在使用的数据库文件".into());
+            }
+        }
+        let mut partial = dest.as_os_str().to_owned();
+        partial.push(".partial");
+        let partial = std::path::PathBuf::from(partial);
+        let _ = std::fs::remove_file(&partial);
+        let snapshot = || -> Result<BackupInfo, String> {
+            let conn = Connection::open(source).map_err(|e| format!("无法打开数据库：{e}"))?;
+            conn.busy_timeout(std::time::Duration::from_secs(10))
+                .map_err(|e| e.to_string())?;
+            let target = partial.to_string_lossy().replace('\'', "''");
+            conn.execute_batch(&format!("VACUUM INTO '{target}'"))
+                .map_err(|e| format!("写入备份失败：{e}"))?;
+            drop(conn);
+            let info = Store::inspect_backup(&partial)?;
+            std::fs::rename(&partial, dest).map_err(|e| format!("无法保存备份文件：{e}"))?;
+            Ok(info)
+        };
+        let result = snapshot();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&partial);
+        }
+        result
+    }
+
+    /// Check that `path` is an intact Veya database and report what it contains.
+    pub fn inspect_backup(path: impl AsRef<Path>) -> Result<BackupInfo, String> {
+        let path = path.as_ref();
+        let size_bytes = std::fs::metadata(path)
+            .map_err(|e| format!("无法读取备份文件：{e}"))?
+            .len();
+        let conn = Connection::open_with_flags(
+            path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .map_err(|e| format!("无法打开备份文件：{e}"))?;
+        let check: String = conn
+            .query_row("PRAGMA quick_check", [], |row| row.get(0))
+            .map_err(|_| "所选文件不是有效的 SQLite 数据库".to_string())?;
+        if check != "ok" {
+            return Err("备份文件已损坏（完整性检查未通过）".into());
+        }
+        let has_table = |name: &str| -> bool {
+            conn.query_row(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                params![name],
+                |_| Ok(()),
+            )
+            .optional()
+            .ok()
+            .flatten()
+            .is_some()
+        };
+        if !has_table("clipboard_record") || !has_table("app_settings") {
+            return Err("所选文件不是 Veya 的备份文件".into());
+        }
+        let count = |table: &str| -> usize {
+            conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .map(|n| n.max(0) as usize)
+            .unwrap_or(0)
+        };
+        Ok(BackupInfo {
+            records: count("clipboard_record"),
+            groups: if has_table("card_group") {
+                count("card_group")
+            } else {
+                0
+            },
+            size_bytes,
+        })
+    }
+
+    /// Replace everything in this database with the contents of `backup`.
+    ///
+    /// The backup is validated first. SQLite copies it into the open database in one
+    /// transaction, so a failure leaves the current data untouched; older backups are then
+    /// migrated to the current schema.
+    pub fn restore_from(&mut self, backup: impl AsRef<Path>) -> Result<BackupInfo, String> {
+        let backup = backup.as_ref();
+        let info = Store::inspect_backup(backup)?;
+        self.conn
+            .restore(
+                DatabaseName::Main,
+                backup,
+                None::<fn(rusqlite::backup::Progress)>,
+            )
+            .map_err(|e| format!("还原失败，当前数据未改动：{e}"))?;
+        self.migrate().map_err(|e| format!("备份数据库升级失败：{e}"))?;
+        Ok(info)
     }
 
     pub fn upsert_application(
@@ -1793,5 +1913,144 @@ mod tests {
             .unwrap();
         assert_eq!(content, "keep me");
         assert!(!has_column(&store.conn, "clipboard_record", "pinned").unwrap());
+    }
+
+    fn unique_temp_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "veya-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn backup_and_restore_round_trip_records_groups_and_settings() {
+        let dir = unique_temp_dir("backup");
+        let live = dir.join("live.db");
+        let backup = dir.join("backup.db");
+        let mut store = Store::open(&live).unwrap();
+        store.insert_record(&rec(1)).unwrap();
+        store.insert_record(&rec(2)).unwrap();
+        store.set_setting("theme", "light").unwrap();
+        let group = store.create_group("工作", 10).unwrap();
+        store.add_group_member(group, 1, 11).unwrap();
+
+        let info = Store::backup_file(&live, &backup).unwrap();
+        assert_eq!((info.records, info.groups), (2, 1));
+        assert!(info.size_bytes > 0);
+        assert!(!dir.join("backup.db.partial").exists());
+        assert_eq!(Store::inspect_backup(&backup).unwrap(), info);
+
+        // Change everything after the backup, then roll back to it.
+        store.insert_record(&rec(3)).unwrap();
+        store.delete_record(1).unwrap();
+        store.set_setting("theme", "dark").unwrap();
+        store.delete_group(group).unwrap();
+        assert_eq!(store.count_records().unwrap(), 2);
+
+        let restored = store.restore_from(&backup).unwrap();
+        assert_eq!(restored, info);
+        assert_eq!(store.count_records().unwrap(), 2);
+        assert!(store.load_record(1).unwrap().is_some());
+        assert!(store.load_record(3).unwrap().is_none());
+        assert_eq!(store.get_setting("theme").unwrap().as_deref(), Some("light"));
+        let groups = store.list_groups().unwrap();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(store.group_members(group).unwrap(), vec![1]);
+        // Still usable for writes afterwards.
+        store.insert_record(&rec(4)).unwrap();
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn backup_overwrites_an_existing_destination() {
+        let dir = unique_temp_dir("backup-overwrite");
+        let live = dir.join("live.db");
+        let backup = dir.join("backup.db");
+        let mut store = Store::open(&live).unwrap();
+        store.insert_record(&rec(1)).unwrap();
+        Store::backup_file(&live, &backup).unwrap();
+        store.insert_record(&rec(2)).unwrap();
+        let info = Store::backup_file(&live, &backup).unwrap();
+        assert_eq!(info.records, 2);
+        assert_eq!(Store::inspect_backup(&backup).unwrap().records, 2);
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn backup_refuses_the_live_database_as_destination() {
+        let dir = unique_temp_dir("backup-self");
+        let live = dir.join("live.db");
+        let mut store = Store::open(&live).unwrap();
+        store.insert_record(&rec(1)).unwrap();
+        assert!(Store::backup_file(&live, &live).is_err());
+        assert_eq!(store.count_records().unwrap(), 1);
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn restore_rejects_files_that_are_not_veya_backups_and_keeps_current_data() {
+        let dir = unique_temp_dir("backup-reject");
+        let live = dir.join("live.db");
+        let mut store = Store::open(&live).unwrap();
+        store.insert_record(&rec(1)).unwrap();
+
+        let text = dir.join("notes.txt");
+        std::fs::write(&text, "this is not a database, just some text padding").unwrap();
+        assert!(Store::inspect_backup(&text).is_err());
+        assert!(store.restore_from(&text).is_err());
+
+        let other = dir.join("other.db");
+        Connection::open(&other)
+            .unwrap()
+            .execute_batch("CREATE TABLE unrelated (id INTEGER); INSERT INTO unrelated VALUES (1);")
+            .unwrap();
+        assert!(Store::inspect_backup(&other).unwrap_err().contains("Veya"));
+        assert!(store.restore_from(&other).is_err());
+
+        assert!(Store::inspect_backup(dir.join("missing.db")).is_err());
+        assert_eq!(store.count_records().unwrap(), 1, "current data untouched");
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn restoring_an_older_backup_migrates_it_to_the_current_schema() {
+        let dir = unique_temp_dir("backup-legacy");
+        let live = dir.join("live.db");
+        let legacy = dir.join("legacy.db");
+        Connection::open(&legacy)
+            .unwrap()
+            .execute_batch(
+                r#"
+                CREATE TABLE clipboard_record (
+                    sequence INTEGER PRIMARY KEY, content_type TEXT NOT NULL,
+                    content TEXT NOT NULL, content_hash TEXT NOT NULL,
+                    source_app TEXT NOT NULL, source_pid INTEGER NOT NULL,
+                    source_window TEXT NOT NULL DEFAULT '', source_confidence TEXT NOT NULL,
+                    created_at_ms INTEGER NOT NULL
+                );
+                CREATE TABLE app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                INSERT INTO clipboard_record VALUES (7, 'text', 'old', 'h', 'a.exe', 1, '', 'exact', 5);
+                "#,
+            )
+            .unwrap();
+        let mut store = Store::open(&live).unwrap();
+        let info = store.restore_from(&legacy).unwrap();
+        assert_eq!((info.records, info.groups), (1, 0));
+        let record = store.load_record(7).unwrap().unwrap();
+        assert_eq!(record.content, "old");
+        assert!(!record.pinned);
+        store.create_group("新分组", 1).unwrap();
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

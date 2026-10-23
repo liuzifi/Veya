@@ -53,6 +53,9 @@ fn main() -> iced::Result {
             position: iced::window::Position::Centered,
             visible: false,
             decorations: false,
+            // Lets the folded quick-paste strip shrink below Windows' default
+            // minimum window width.
+            min_size: Some(iced::Size::new(24.0, 100.0)),
             icon: window_icon(),
             ..Default::default()
         })
