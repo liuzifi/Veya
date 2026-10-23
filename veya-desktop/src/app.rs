@@ -333,6 +333,10 @@ pub enum Message {
     CancelRestoreDatabase,
     QuickStripPress,
     QuickToggleFold,
+    /// Mouse entered the strip while folded — auto-expand.
+    QuickHoverExpand,
+    /// Mouse left the panel while hover-expanded — auto-fold.
+    QuickHoverFold,
     QuickUnfocused,
     QuickDeleteGroup(i64),
     QuickOpenCardMenu(u32),
@@ -706,6 +710,8 @@ impl App {
                 | Message::OpenCardMenu(_)
                 | Message::QuickOpenCardMenu(_)
                 | Message::QuickGroupInputChanged(_)
+                | Message::QuickHoverExpand
+                | Message::QuickHoverFold
         ) {
             self.card_menu = None;
         }
@@ -757,7 +763,30 @@ impl App {
             Message::QuickStripPress => self.quick_strip_press(),
             Message::QuickToggleFold => {
                 let folded = self.quick.as_ref().is_some_and(|quick| quick.strip_folded());
+                // Manual fold toggle always clears the hover-expanded flag so
+                // that the panel stays in whichever state the user chose.
+                if let Some(quick) = &mut self.quick {
+                    quick.strip.hover_expanded = false;
+                }
                 self.set_quick_folded(!folded)
+            }
+            Message::QuickHoverExpand => {
+                let Some(quick) = &mut self.quick else { return Task::none(); };
+                if quick.strip.folded {
+                    quick.strip.hover_expanded = true;
+                    self.set_quick_folded(false)
+                } else {
+                    Task::none()
+                }
+            }
+            Message::QuickHoverFold => {
+                let Some(quick) = &mut self.quick else { return Task::none(); };
+                if quick.strip.hover_expanded {
+                    quick.strip.hover_expanded = false;
+                    self.set_quick_folded(true)
+                } else {
+                    Task::none()
+                }
             }
             Message::QuickUnfocused => self.quick_unfocused(),
             Message::QuickSelectGroup(group_id) => {

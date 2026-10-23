@@ -44,6 +44,11 @@ struct Strip {
     last_press: Option<std::time::Instant>,
     /// Window size to return to when unfolding.
     expanded_size: iced::Size,
+    /// Whether the panel was auto-expanded because the mouse hovered over the
+    /// collapsed strip.  When true, moving the mouse off the panel folds it
+    /// back; clicking the fold button clears the flag and keeps the panel
+    /// manually unfolded.
+    hover_expanded: bool,
 }
 
 struct ManagementState {
@@ -759,10 +764,18 @@ impl App {
             .padding(14)
             .width(Length::Fill)
             .height(Length::Fill);
-        let base = container(row![left, theme::vdivider(), strip])
+        let base: Element<'_, Message> = container(row![left, theme::vdivider(), strip])
             .width(Length::Fill)
             .height(Length::Fill)
-            .style(theme::shell_style);
+            .style(theme::shell_style)
+            .into();
+        // When the panel was auto-expanded by hovering over the folded strip,
+        // wrap the whole panel so that moving the mouse off it folds it back.
+        let base = if quick.strip.hover_expanded {
+            mouse_area(base).on_exit(Message::QuickHoverFold).into()
+        } else {
+            base
+        };
         let overlay: Element<'_, Message> = self
             .card_menu
             .and_then(|menu| {
@@ -773,7 +786,7 @@ impl App {
                     .map(|card| self.quick_card_menu(card, menu.position))
             })
             .unwrap_or_else(|| Space::new(Length::Fill, Length::Fill).into());
-        stack([base.into(), overlay]).into()
+        stack([base, overlay]).into()
     }
 
     /// Right-hand strip: close and fold buttons on top, the title below. Blank
@@ -802,7 +815,8 @@ impl App {
                 .center_x(Length::Fill)
                 .height(Length::Fill),
         )
-        .on_press(Message::QuickStripPress);
+        .on_press(Message::QuickStripPress)
+        .on_enter(Message::QuickHoverExpand);
         container(
             column![close, fold, blank]
                 .align_x(Alignment::Center)
@@ -1826,5 +1840,41 @@ pub(in crate::app) mod tests {
         render_at(&app, iced::Size::new(QUICK_WIDTH, QUICK_HEIGHT));
         let _ = app.update(Message::QuickToggleFold);
         render_at(&app, iced::Size::new(STRIP_WIDTH, QUICK_HEIGHT));
+    }
+
+    #[test]
+    fn hover_expand_unfolds_and_hover_fold_collapses() {
+        let mut app = quick_app();
+        app.window_size = iced::Size::new(QUICK_WIDTH, QUICK_HEIGHT);
+        let _ = app.update(Message::QuickToggleFold);
+        assert!(strip(&app).folded);
+        assert!(!strip(&app).hover_expanded);
+        let _ = app.update(Message::QuickHoverExpand);
+        assert!(!strip(&app).folded);
+        assert!(strip(&app).hover_expanded);
+        let _ = app.update(Message::QuickHoverFold);
+        assert!(strip(&app).folded);
+        assert!(!strip(&app).hover_expanded);
+    }
+
+    #[test]
+    fn manual_toggle_clears_hover_expanded() {
+        let mut app = quick_app();
+        app.window_size = iced::Size::new(QUICK_WIDTH, QUICK_HEIGHT);
+        let _ = app.update(Message::QuickToggleFold);
+        let _ = app.update(Message::QuickHoverExpand);
+        assert!(strip(&app).hover_expanded);
+        let _ = app.update(Message::QuickToggleFold);
+        assert!(!strip(&app).hover_expanded);
+        assert!(!strip(&app).folded);
+    }
+
+    #[test]
+    fn hover_expand_is_ignored_when_already_unfolded() {
+        let mut app = quick_app();
+        app.window_size = iced::Size::new(QUICK_WIDTH, QUICK_HEIGHT);
+        let _ = app.update(Message::QuickHoverExpand);
+        assert!(!strip(&app).folded);
+        assert!(!strip(&app).hover_expanded);
     }
 }

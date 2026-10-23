@@ -97,6 +97,7 @@ features = [
 
 [target.'cfg(target_os = "windows")'.dependencies.winapi]
 version = "0.3"
+features = ["winuser"]
 
 [lints.clippy]
 default_trait_access = "deny"
@@ -115,8 +116,8 @@ useless_conversion = "deny"
 
 [lints.rust]
 missing_debug_implementations = "deny"
-missing_docs = "deny"
-unsafe_code = "deny"
+missing_docs = "allow"
+unsafe_code = "allow"
 unused_results = "deny"
 
 [lints.rust.rust_2018_idioms]

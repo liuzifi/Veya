@@ -175,12 +175,19 @@ pub fn window_event(
         }
         WindowEvent::MouseWheel { delta, .. } => match delta {
             winit::event::MouseScrollDelta::LineDelta(delta_x, delta_y) => {
-                Some(Event::Mouse(mouse::Event::WheelScrolled {
-                    delta: mouse::ScrollDelta::Lines {
-                        x: delta_x,
-                        y: delta_y,
-                    },
-                }))
+                #[cfg(target_os = "windows")]
+                {
+                    apply_windows_wheel_scroll(delta_x, delta_y)
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    Some(Event::Mouse(mouse::Event::WheelScrolled {
+                        delta: mouse::ScrollDelta::Lines {
+                            x: delta_x,
+                            y: delta_y,
+                        },
+                    }))
+                }
             }
             winit::event::MouseScrollDelta::PixelDelta(position) => {
                 Some(Event::Mouse(mouse::Event::WheelScrolled {
@@ -297,6 +304,82 @@ pub fn window_event(
             Some(Event::Window(window::Event::Moved(Point::new(x, y))))
         }
         _ => None,
+    }
+}
+
+/// On Windows, applies the system "scroll lines per wheel notch" setting
+/// (SPI_GETWHEELSCROLLLINES) to the wheel delta.
+///
+/// winit 0.30 sends a raw `LineDelta(0.0, ±1.0)` per wheel notch without
+/// consulting the system setting. iced's `scrollable` widget then multiplies
+/// by `WHEEL_PX_PER_LINE = 120.0`, so one notch always scrolls 120 px
+/// regardless of how many lines the user configured.
+///
+/// This function reads `SPI_GETWHEELSCROLLLINES`:
+/// - Normal value N (1–u32::MAX-1): multiply the line delta by N so iced
+///   scrolls N × 120 px per notch (matching the user's "scroll N lines" setting).
+/// - `WHEEL_PAGESCROLL` (u32::MAX): the user chose "scroll one screen at a
+///   time".  We convert to a pixel-based delta so iced scrolls a full page
+///   rather than a fixed line count.
+///
+/// On any error the original delta is passed through unchanged.
+#[cfg(target_os = "windows")]
+fn apply_windows_wheel_scroll(
+    delta_x: f32,
+    delta_y: f32,
+) -> Option<Event> {
+    use winapi::um::winuser::{
+        SystemParametersInfoW, SPI_GETWHEELSCROLLLINES, WHEEL_PAGESCROLL,
+    };
+
+    /// Pixels used when the user selects "scroll one screen at a time".
+    /// This is a heuristic that approximates one viewport height; iced's
+    /// scrollable will clamp to the actual scroll bounds.
+    const PAGE_SCROLL_PX: f32 = 600.0;
+
+    /// Fallback when SPI_GETWHEELSCROLLLINES returns 0 (treat as 1 line).
+    const DEFAULT_LINES: u32 = 1;
+
+    // Safety: SystemParametersInfoW with SPI_GETWHEELSCROLLLINES writes a
+    // single u32 into the provided buffer.  All pointer arguments that are
+    // not needed are NULL, which is valid for this SPI code.
+    unsafe {
+        let mut lines: u32 = DEFAULT_LINES;
+        let result = SystemParametersInfoW(
+            SPI_GETWHEELSCROLLLINES,
+            0,
+            &mut lines as *mut u32 as *mut _,
+            0,
+        );
+
+        if result == 0 {
+            // Call failed — fall back to the original passthrough.
+            return Some(Event::Mouse(mouse::Event::WheelScrolled {
+                delta: mouse::ScrollDelta::Lines {
+                    x: delta_x,
+                    y: delta_y,
+                },
+            }));
+        }
+
+        if lines == WHEEL_PAGESCROLL {
+            // "Scroll one screen at a time" — convert to pixel delta.
+            Some(Event::Mouse(mouse::Event::WheelScrolled {
+                delta: mouse::ScrollDelta::Pixels {
+                    x: delta_x * PAGE_SCROLL_PX,
+                    y: delta_y * PAGE_SCROLL_PX,
+                },
+            }))
+        } else {
+            // Normal "scroll N lines" — multiply the line delta.
+            let multiplier = lines.max(1) as f32;
+            Some(Event::Mouse(mouse::Event::WheelScrolled {
+                delta: mouse::ScrollDelta::Lines {
+                    x: delta_x * multiplier,
+                    y: delta_y * multiplier,
+                },
+            }))
+        }
     }
 }
 
