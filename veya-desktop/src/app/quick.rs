@@ -61,6 +61,10 @@ impl QuickPanel {
         self.strip.folded
     }
 
+    pub(super) fn set_ctrl_down(&mut self, down: bool) {
+        self.ctrl_down = down;
+    }
+
     pub(super) fn busy(&self) -> bool {
         self.pending.is_some() || self.sending
     }

@@ -730,7 +730,7 @@ impl App {
             Message::QuickPasteNth(index) => self.quick_paste_nth(index),
             Message::QuickCtrl(down) => {
                 if let Some(quick) = &mut self.quick {
-                    quick.ctrl_down = down;
+                    quick.set_ctrl_down(down);
                 }
                 Task::none()
             }
