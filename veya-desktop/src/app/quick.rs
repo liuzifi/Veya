@@ -66,10 +66,6 @@ struct ManagementState {
 }
 
 impl QuickPanel {
-    pub(super) fn strip_folded(&self) -> bool {
-        self.strip.folded
-    }
-
     pub(super) fn set_ctrl_down(&mut self, down: bool) {
         self.ctrl_down = down;
     }

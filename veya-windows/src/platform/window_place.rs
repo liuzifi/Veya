@@ -238,7 +238,7 @@ pub fn clear_window_opacity() -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{fit_and_center, physical_to_window_logical};
+    use super::{fit_and_anchor, fit_and_center, physical_to_window_logical};
 
     #[test]
     fn centers_on_scaled_secondary_monitor_with_negative_origin() {
