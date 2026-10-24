@@ -98,8 +98,8 @@ mod native {
         {
             *slot = unit;
         }
-        let owner =
-            unsafe { FindWindowW(PCWSTR::null(), PCWSTR(owner_title.as_ptr())) }.unwrap_or_default();
+        let owner = unsafe { FindWindowW(PCWSTR::null(), PCWSTR(owner_title.as_ptr())) }
+            .unwrap_or_default();
         let flags = if save {
             OFN_EXPLORER
                 | OFN_OVERWRITEPROMPT
@@ -107,7 +107,11 @@ mod native {
                 | OFN_NOCHANGEDIR
                 | OFN_HIDEREADONLY
         } else {
-            OFN_EXPLORER | OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR | OFN_HIDEREADONLY
+            OFN_EXPLORER
+                | OFN_FILEMUSTEXIST
+                | OFN_PATHMUSTEXIST
+                | OFN_NOCHANGEDIR
+                | OFN_HIDEREADONLY
         };
         let mut dialog = OPENFILENAMEW {
             lStructSize: std::mem::size_of::<OPENFILENAMEW>() as u32,
@@ -131,7 +135,10 @@ mod native {
         if !accepted.as_bool() {
             return None;
         }
-        let length = file.iter().position(|unit| *unit == 0).unwrap_or(file.len());
+        let length = file
+            .iter()
+            .position(|unit| *unit == 0)
+            .unwrap_or(file.len());
         (length > 0).then(|| PathBuf::from(OsString::from_wide(&file[..length])))
     }
 }
@@ -153,6 +160,9 @@ mod tests {
         let stamp = local_timestamp();
         assert_eq!(stamp.len(), 15);
         assert_eq!(stamp.as_bytes()[8], b'-');
-        assert!(stamp.bytes().filter(|b| *b != b'-').all(|b| b.is_ascii_digit()));
+        assert!(stamp
+            .bytes()
+            .filter(|b| *b != b'-')
+            .all(|b| b.is_ascii_digit()));
     }
 }

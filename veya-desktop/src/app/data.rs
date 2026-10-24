@@ -199,28 +199,27 @@ impl App {
                 base.on_press(message)
             }
         };
-        let head = row![
-            icons::icon(Icon::External, theme::ACCENT(), 18.0),
-            column![
+        let head =
+            row![
+                icons::icon(Icon::External, theme::ACCENT(), 18.0),
+                column![
                 body("备份与还原").size(13).font(crate::font::name_font()),
                 meta("备份包含全部历史、分组和设置；还原会替换当前全部数据，还原前自动保留一份副本")
                     .size(11)
                     .color(theme::MUTED()),
             ]
-            .spacing(2)
-            .width(Length::Fill),
-            action("备份…", Message::BackupDatabase),
-            action("还原…", Message::RestoreDatabase),
-        ]
-        .spacing(12)
-        .align_y(Alignment::Center);
+                .spacing(2)
+                .width(Length::Fill),
+                action("备份…", Message::BackupDatabase),
+                action("还原…", Message::RestoreDatabase),
+            ]
+            .spacing(12)
+            .align_y(Alignment::Center);
 
         let status: Option<Element<'_, Message>> = match &self.data_job {
             DataJob::Idle => None,
             DataJob::Working(note) => Some(meta(*note).size(11).color(theme::MUTED()).into()),
-            DataJob::Done(Ok(note)) => {
-                Some(meta(note.clone()).size(11).color(theme::OK()).into())
-            }
+            DataJob::Done(Ok(note)) => Some(meta(note.clone()).size(11).color(theme::OK()).into()),
             DataJob::Done(Err(note)) => {
                 Some(meta(note.clone()).size(11).color(theme::DANGER()).into())
             }
@@ -313,7 +312,10 @@ mod tests {
 
         let _ = app.update(Message::RestoreInspected(Ok((path.clone(), info()))));
         assert!(matches!(app.data_job, DataJob::ConfirmRestore { .. }));
-        assert!(cmd_rx.try_recv().is_err(), "nothing is sent before confirming");
+        assert!(
+            cmd_rx.try_recv().is_err(),
+            "nothing is sent before confirming"
+        );
 
         let _ = app.update(Message::CancelRestoreDatabase);
         assert!(matches!(app.data_job, DataJob::Idle));
@@ -334,7 +336,9 @@ mod tests {
         let mut app = isolated_app();
         let (cmd_tx, cmd_rx) = std::sync::mpsc::channel();
         app.worker.cmd_tx = cmd_tx;
-        let _ = app.update(Message::RestoreInspected(Err("不是 Veya 的备份文件".into())));
+        let _ = app.update(Message::RestoreInspected(
+            Err("不是 Veya 的备份文件".into()),
+        ));
         assert!(matches!(&app.data_job, DataJob::Done(Err(note)) if note.contains("无法使用")));
         let _ = app.update(Message::ConfirmRestoreDatabase);
         assert!(cmd_rx.try_recv().is_err());

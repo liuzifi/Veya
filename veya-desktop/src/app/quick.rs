@@ -591,11 +591,10 @@ impl App {
                 QuickTitlePosition::Top => {
                     resize_window(iced::Size::new(window_size.width, STRIP_WIDTH))
                 }
-                QuickTitlePosition::Bottom => resize_window(iced::Size::new(
-                    window_size.width,
-                    STRIP_WIDTH,
-                ))
-                .chain(shift_window_y(window_size.height - STRIP_WIDTH)),
+                QuickTitlePosition::Bottom => {
+                    resize_window(iced::Size::new(window_size.width, STRIP_WIDTH))
+                        .chain(shift_window_y(window_size.height - STRIP_WIDTH))
+                }
                 QuickTitlePosition::Left => {
                     resize_window(iced::Size::new(STRIP_WIDTH, window_size.height))
                 }
@@ -613,10 +612,12 @@ impl App {
         } else {
             let size = quick.strip.expanded_size;
             let unfold = match title_position {
-                QuickTitlePosition::Bottom => shift_window_y(-(size.height - STRIP_WIDTH))
-                    .chain(resize_window(size)),
-                QuickTitlePosition::Right => shift_window_x(-(size.width - STRIP_WIDTH))
-                    .chain(resize_window(size)),
+                QuickTitlePosition::Bottom => {
+                    shift_window_y(-(size.height - STRIP_WIDTH)).chain(resize_window(size))
+                }
+                QuickTitlePosition::Right => {
+                    shift_window_x(-(size.width - STRIP_WIDTH)).chain(resize_window(size))
+                }
                 _ => resize_window(size),
             };
             unfold
@@ -739,10 +740,9 @@ impl App {
         }
         // Each row has a fixed height; keep the keyboard selection in view.
         let row_height = quick_row_height(self.state.quick_settings.display_lines);
-        let viewport = (self.window_size.height
-            - QUICK_CHROME_HEIGHT
-            - self.quick_strip_extra_height())
-        .max(row_height);
+        let viewport =
+            (self.window_size.height - QUICK_CHROME_HEIGHT - self.quick_strip_extra_height())
+                .max(row_height);
         let content = sequences.len() as f32 * row_height;
         let overflow = (content - viewport).max(1.0);
         let offset =
@@ -989,7 +989,11 @@ impl App {
     fn quick_strip(&self, quick: &QuickPanel) -> Element<'_, Message> {
         let pinned = quick.strip.pinned;
         let folded = quick.strip.folded;
-        let tint = if pinned { theme::ACCENT() } else { theme::MUTED() };
+        let tint = if pinned {
+            theme::ACCENT()
+        } else {
+            theme::MUTED()
+        };
         let close = button(icons::icon(Icon::Close, theme::MUTED(), 12.0))
             .padding(pad(5.0, 5.0, 5.0, 5.0))
             .style(theme::win_button)
@@ -1010,9 +1014,13 @@ impl App {
             .on_press(Message::QuickToggleFold);
         match self.state.quick_settings.title_position {
             QuickTitlePosition::Top | QuickTitlePosition::Bottom => {
-                let title = meta(if pinned { "Veya · 窗口置顶" } else { "Veya · 快捷粘贴" })
-                    .size(12)
-                    .color(tint);
+                let title = meta(if pinned {
+                    "Veya · 窗口置顶"
+                } else {
+                    "Veya · 快捷粘贴"
+                })
+                .size(12)
+                .color(tint);
                 let blank = mouse_area(
                     container(title)
                         .width(Length::Fill)
@@ -1035,7 +1043,14 @@ impl App {
                 let title = column![
                     vertical_text("Veya", tint),
                     Space::with_height(8),
-                    vertical_text(if pinned { "窗口置顶" } else { "快捷粘贴" }, tint),
+                    vertical_text(
+                        if pinned {
+                            "窗口置顶"
+                        } else {
+                            "快捷粘贴"
+                        },
+                        tint
+                    ),
                 ]
                 .align_x(Alignment::Center);
                 let blank = mouse_area(
@@ -1179,7 +1194,11 @@ impl App {
                 .into(),
             );
         } else {
-            let label = if is_text { "编辑（内容过长）" } else { "编辑（仅文本）" };
+            let label = if is_text {
+                "编辑（内容过长）"
+            } else {
+                "编辑（仅文本）"
+            };
             items.push(menu_item_disabled(Icon::Edit, label.to_string()).into());
         }
         // ── 新建 ──
@@ -1404,11 +1423,7 @@ impl App {
         let Some(seq) = self.quick_properties else {
             return Space::new(Length::Fill, Length::Fill).into();
         };
-        let card = self
-            .state
-            .cards
-            .iter()
-            .find(|c| c.sequence == seq);
+        let card = self.state.cards.iter().find(|c| c.sequence == seq);
         let card = match card {
             Some(c) => c,
             None => {
@@ -2355,7 +2370,11 @@ pub(in crate::app) mod tests {
         assert_eq!(nth("0", Modifiers::CTRL), Some(9));
         assert_eq!(nth("a", Modifiers::CTRL), None);
         assert_eq!(nth("12", Modifiers::CTRL), None);
-        assert_eq!(nth("1", Modifiers::empty()), None, "plain digits still type");
+        assert_eq!(
+            nth("1", Modifiers::empty()),
+            None,
+            "plain digits still type"
+        );
         assert_eq!(nth("1", Modifiers::CTRL | Modifiers::SHIFT), None);
         assert_eq!(nth("1", Modifiers::ALT), None);
     }
@@ -2380,7 +2399,10 @@ pub(in crate::app) mod tests {
         let _ = app.update(Message::SearchChanged("ab1".into()));
         assert_eq!(app.search, "ab");
         let _ = app.update(Message::SearchChanged("abc".into()));
-        assert_eq!(app.search, "abc", "letters and pastes still edit the search");
+        assert_eq!(
+            app.search, "abc",
+            "letters and pastes still edit the search"
+        );
         let _ = app.update(Message::QuickCtrl(false));
         let _ = app.update(Message::SearchChanged("abc1".into()));
         assert_eq!(app.search, "abc1");
@@ -2599,7 +2621,10 @@ pub(in crate::app) mod tests {
         // Card 1 is 1004 characters; the excerpt that fills the edit box holds 512.
         assert!(!card_text_is_editable(&app.state.cards[0]));
         let _ = app.update(Message::QuickStartEditCard(1));
-        assert!(app.quick_edit.is_none(), "no edit box for a text it cannot show in full");
+        assert!(
+            app.quick_edit.is_none(),
+            "no edit box for a text it cannot show in full"
+        );
         assert!(app.quick.as_ref().unwrap().error.is_some());
     }
 
@@ -2610,7 +2635,10 @@ pub(in crate::app) mod tests {
         assert!(card_text_is_editable(&app.state.cards[0]));
         let _ = app.update(Message::QuickStartEditCard(7));
         let edit = app.quick_edit.as_ref().expect("edit box opened");
-        assert_eq!((edit.sequence, edit.value.as_str()), (Some(7), "hello 世界"));
+        assert_eq!(
+            (edit.sequence, edit.value.as_str()),
+            (Some(7), "hello 世界")
+        );
         assert!(app.quick.as_ref().unwrap().error.is_none());
     }
 }

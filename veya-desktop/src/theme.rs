@@ -460,9 +460,15 @@ pub fn card_button_quick(
                     // window is invisible, so the light palette shades with its inset grey.
                     if alt {
                         let tint = if p.light {
-                            Color { a: 0.85, ..p.chip_bg }
+                            Color {
+                                a: 0.85,
+                                ..p.chip_bg
+                            }
                         } else {
-                            Color { a: 0.45, ..p.surface }
+                            Color {
+                                a: 0.45,
+                                ..p.surface
+                            }
                         };
                         (tint, tint, Color::TRANSPARENT, 0.0)
                     } else {
@@ -1065,8 +1071,14 @@ mod tests {
             }
             assert!(contrast(p.faint, ground) >= 3.5, "faint on {ground:?}");
         }
-        assert!(contrast(p.faint, p.chip_bg) >= 3.4, "placeholder in a field");
-        assert!(contrast(ON_ACCENT_COLOR, p.accent) >= 4.5, "label on accent");
+        assert!(
+            contrast(p.faint, p.chip_bg) >= 3.4,
+            "placeholder in a field"
+        );
+        assert!(
+            contrast(ON_ACCENT_COLOR, p.accent) >= 4.5,
+            "label on accent"
+        );
     }
 
     #[test]

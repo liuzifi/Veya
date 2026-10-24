@@ -6,8 +6,8 @@ use std::{collections::HashMap, fmt::Write as _, path::Path};
 
 use rusqlite::{params, types::Type, Connection, DatabaseName, OptionalExtension};
 use veya_core::{
-    payload_hash, ClipboardPayload, ClipboardRecord, HistoryPayload, HistoryRecord,
-    PasteMethod, PasteTriggerRecord, SourceConfidence,
+    payload_hash, ClipboardPayload, ClipboardRecord, HistoryPayload, HistoryRecord, PasteMethod,
+    PasteTriggerRecord, SourceConfidence,
 };
 
 /// Lightweight projection used by the UI to render the group tab bar.
@@ -1083,7 +1083,8 @@ impl Store {
                 None::<fn(rusqlite::backup::Progress)>,
             )
             .map_err(|e| format!("还原失败，当前数据未改动：{e}"))?;
-        self.migrate().map_err(|e| format!("备份数据库升级失败：{e}"))?;
+        self.migrate()
+            .map_err(|e| format!("备份数据库升级失败：{e}"))?;
         Ok(info)
     }
 
@@ -1245,9 +1246,8 @@ fn effective_pin_rank(pinned: bool, stored: i64) -> u8 {
 /// by time. Comparing by time alone would repeat pinned rows on every page and skip rows
 /// when a page ends inside a pinned group.
 fn page_filter(comparison: &str) -> String {
-    let cursor_group = format!(
-        "COALESCE((SELECT {RANK_GROUP} FROM clipboard_record WHERE sequence = ?2), 1)"
-    );
+    let cursor_group =
+        format!("COALESCE((SELECT {RANK_GROUP} FROM clipboard_record WHERE sequence = ?2), 1)");
     format!(
         "(?1 IS NULL \
          OR {RANK_GROUP} > {cursor_group} \
@@ -2154,7 +2154,10 @@ mod tests {
         assert_eq!(store.count_records().unwrap(), 2);
         assert!(store.load_record(1).unwrap().is_some());
         assert!(store.load_record(3).unwrap().is_none());
-        assert_eq!(store.get_setting("theme").unwrap().as_deref(), Some("light"));
+        assert_eq!(
+            store.get_setting("theme").unwrap().as_deref(),
+            Some("light")
+        );
         let groups = store.list_groups().unwrap();
         assert_eq!(groups.len(), 1);
         assert_eq!(store.group_members(group).unwrap(), vec![1]);
@@ -2308,7 +2311,10 @@ mod tests {
                     cursor = Some((last.created_at_ms, last.sequence));
                     seen.extend(page.iter().map(|record| record.sequence));
                 }
-                assert_eq!(seen, expected, "records, newest_first={newest_first}, page={page_size}");
+                assert_eq!(
+                    seen, expected,
+                    "records, newest_first={newest_first}, page={page_size}"
+                );
 
                 let mut seen = Vec::new();
                 let mut cursor = None;
@@ -2320,7 +2326,10 @@ mod tests {
                     cursor = Some((last.created_at_ms, last.sequence));
                     seen.extend(page.iter().map(|record| record.sequence));
                 }
-                assert_eq!(seen, expected, "history, newest_first={newest_first}, page={page_size}");
+                assert_eq!(
+                    seen, expected,
+                    "history, newest_first={newest_first}, page={page_size}"
+                );
             }
         }
         drop(store);
@@ -2336,8 +2345,15 @@ mod tests {
         }
         let load = |store: &Store, seq: u32| store.load_record(seq).unwrap().unwrap();
         assert_eq!(store.set_pinned(&[2], true).unwrap(), 1);
-        assert_eq!((load(&store, 2).pinned, load(&store, 2).pin_rank), (true, 0));
-        assert_eq!(order_of(&store, true), vec![3, 2, 1], "a plain pin does not reorder");
+        assert_eq!(
+            (load(&store, 2).pinned, load(&store, 2).pin_rank),
+            (true, 0)
+        );
+        assert_eq!(
+            order_of(&store, true),
+            vec![3, 2, 1],
+            "a plain pin does not reorder"
+        );
 
         store.set_pin_rank(2, 2).unwrap();
         assert_eq!(order_of(&store, true), vec![3, 1, 2]);
@@ -2345,8 +2361,15 @@ mod tests {
         assert_eq!(load(&store, 2).pin_rank, 2);
 
         assert_eq!(store.set_pinned(&[2], false).unwrap(), 1);
-        assert_eq!((load(&store, 2).pinned, load(&store, 2).pin_rank), (false, 0));
-        assert_eq!(order_of(&store, true), vec![3, 2, 1], "back in its place in time");
+        assert_eq!(
+            (load(&store, 2).pinned, load(&store, 2).pin_rank),
+            (false, 0)
+        );
+        assert_eq!(
+            order_of(&store, true),
+            vec![3, 2, 1],
+            "back in its place in time"
+        );
         drop(store);
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -2363,8 +2386,11 @@ mod tests {
         }
         // Row 3 was unpinned by an older build that left its position behind.
         let conn = Connection::open(&path).unwrap();
-        conn.execute("UPDATE clipboard_record SET pinned = 0, pin_rank = 1 WHERE sequence = 3", [])
-            .unwrap();
+        conn.execute(
+            "UPDATE clipboard_record SET pinned = 0, pin_rank = 1 WHERE sequence = 3",
+            [],
+        )
+        .unwrap();
         conn.execute_batch(
             "CREATE TRIGGER no_record_update BEFORE UPDATE ON clipboard_record \
              BEGIN SELECT RAISE(ABORT, 'record rewritten'); END;",

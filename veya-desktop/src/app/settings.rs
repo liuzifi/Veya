@@ -54,7 +54,10 @@ impl App {
             })),
             border: iced::Border {
                 color: if self.state.tracking {
-                    Color { a: 0.45, ..theme::OK() }
+                    Color {
+                        a: 0.45,
+                        ..theme::OK()
+                    }
                 } else {
                     theme::BORDER()
                 },
@@ -397,12 +400,8 @@ impl App {
         let popup_pos_row = row![
             icons::icon(Icon::Search, theme::ACCENT(), 18.0),
             column![
-                body("弹出位置")
-                    .size(13)
-                    .font(crate::font::name_font()),
-                meta("快捷面板出现的位置")
-                    .size(11)
-                    .color(theme::MUTED()),
+                body("弹出位置").size(13).font(crate::font::name_font()),
+                meta("快捷面板出现的位置").size(11).color(theme::MUTED()),
             ]
             .spacing(2)
             .width(Length::Fill),
@@ -428,9 +427,7 @@ impl App {
         let on_top_row = row![
             icons::icon(Icon::Pin, theme::ACCENT(), 18.0),
             column![
-                body("面板窗口置顶")
-                    .size(13)
-                    .font(crate::font::name_font()),
+                body("面板窗口置顶").size(13).font(crate::font::name_font()),
                 meta("快捷面板显示时始终保持在其他窗口之上")
                     .size(11)
                     .color(theme::MUTED()),
@@ -457,9 +454,7 @@ impl App {
         let auto_dismiss_row = row![
             icons::icon(Icon::Close, theme::ACCENT(), 18.0),
             column![
-                body("失焦自动关闭")
-                    .size(13)
-                    .font(crate::font::name_font()),
+                body("失焦自动关闭").size(13).font(crate::font::name_font()),
                 meta("焦点离开面板时自动收起；关闭后需按 Esc 手动退出")
                     .size(11)
                     .color(theme::MUTED()),
@@ -488,9 +483,7 @@ impl App {
         let opacity_row = row![
             icons::icon(Icon::External, theme::ACCENT(), 18.0),
             column![
-                body("面板不透明度")
-                    .size(13)
-                    .font(crate::font::name_font()),
+                body("面板不透明度").size(13).font(crate::font::name_font()),
                 meta("快捷面板的显示不透明度（10–100 的百分比）")
                     .size(11)
                     .color(theme::MUTED()),
@@ -520,9 +513,7 @@ impl App {
         let title_pos_row = row![
             icons::icon(Icon::Search, theme::ACCENT(), 18.0),
             column![
-                body("标题栏位置")
-                    .size(13)
-                    .font(crate::font::name_font()),
+                body("标题栏位置").size(13).font(crate::font::name_font()),
                 meta("面板标题条所在的一侧，决定折叠方向")
                     .size(11)
                     .color(theme::MUTED()),

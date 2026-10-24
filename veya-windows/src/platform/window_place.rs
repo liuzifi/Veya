@@ -8,9 +8,9 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 use windows::Win32::UI::WindowsAndMessaging::{
-    FindWindowExW, GetCursorPos, GetForegroundWindow, GetGUIThreadInfo,
-    GetWindowLongPtrW, GetWindowThreadProcessId, SetLayeredWindowAttributes, SetWindowLongPtrW,
-    GWL_EXSTYLE, GUITHREADINFO, LWA_ALPHA, WS_EX_LAYERED,
+    FindWindowExW, GetCursorPos, GetForegroundWindow, GetGUIThreadInfo, GetWindowLongPtrW,
+    GetWindowThreadProcessId, SetLayeredWindowAttributes, SetWindowLongPtrW, GUITHREADINFO,
+    GWL_EXSTYLE, LWA_ALPHA, WS_EX_LAYERED,
 };
 
 type GetDpiForMonitorFn = unsafe extern "system" fn(HMONITOR, i32, *mut u32, *mut u32) -> HRESULT;
@@ -143,8 +143,12 @@ fn fit_and_anchor(
     let logical_size = (size.0.min(available_width), size.1.min(available_height));
     let phys_w = logical_size.0 * scale;
     let phys_h = logical_size.1 * scale;
-    let x = anchor.0.clamp(left as f32, (right as f32 - phys_w).max(left as f32));
-    let y = anchor.1.clamp(top as f32, (bottom as f32 - phys_h).max(top as f32));
+    let x = anchor
+        .0
+        .clamp(left as f32, (right as f32 - phys_w).max(left as f32));
+    let y = anchor
+        .1
+        .clamp(top as f32, (bottom as f32 - phys_h).max(top as f32));
     StartupPlacement {
         logical_size,
         physical_position: (x, y),

@@ -26,13 +26,23 @@ const HISTORY_PAGE_SIZE: usize = 25;
 const HISTORY_READ_BATCH: usize = 16;
 
 pub enum WorkerCmd {
-    Recopy { sequence: u32 },
-    PreparePaste { sequence: u32, request_id: u64 },
-    RecopyPlainText { sequence: u32 },
+    Recopy {
+        sequence: u32,
+    },
+    PreparePaste {
+        sequence: u32,
+        request_id: u64,
+    },
+    RecopyPlainText {
+        sequence: u32,
+    },
     LoadContent(u32),
     UnloadContent,
     ClearHistory,
-    SetTracking { on: bool, request_id: Option<u64> },
+    SetTracking {
+        on: bool,
+        request_id: Option<u64>,
+    },
     SetThemeMode(ThemeMode),
     SetMaxItems(MaxItemsConfig),
     SetExpiry(ExpiryConfig),
@@ -41,30 +51,72 @@ pub enum WorkerCmd {
         /// Record to put into the new group right away (from a card's context menu).
         add_sequence: Option<u32>,
     },
-    RenameGroup { id: i64, name: String },
-    DeleteGroup { id: i64 },
-    AddToGroup { group_id: i64, sequence: u32 },
-    RemoveFromGroup { group_id: i64, sequences: Vec<u32> },
-    ExcludeApp { exe: String },
-    UnexcludeApp { exe: String },
-    DeleteRecord { sequences: Vec<u32> },
-    SetPinned { sequences: Vec<u32>, pinned: bool },
+    RenameGroup {
+        id: i64,
+        name: String,
+    },
+    DeleteGroup {
+        id: i64,
+    },
+    AddToGroup {
+        group_id: i64,
+        sequence: u32,
+    },
+    RemoveFromGroup {
+        group_id: i64,
+        sequences: Vec<u32>,
+    },
+    ExcludeApp {
+        exe: String,
+    },
+    UnexcludeApp {
+        exe: String,
+    },
+    DeleteRecord {
+        sequences: Vec<u32>,
+    },
+    SetPinned {
+        sequences: Vec<u32>,
+        pinned: bool,
+    },
     /// Update the text content of an existing text record.
-    UpdateRecordText { sequence: u32, text: String },
+    UpdateRecordText {
+        sequence: u32,
+        text: String,
+    },
     /// Insert a new text record into the database and flow engine.
-    CreateTextRecord { text: String, created_at_ms: i64 },
+    CreateTextRecord {
+        text: String,
+        created_at_ms: i64,
+    },
     /// Set pin_rank for a record: 0 = unpinned, 1 = top, 2 = bottom.
-    SetPinRank { sequence: u32, rank: u8 },
+    SetPinRank {
+        sequence: u32,
+        rank: u8,
+    },
     /// Set the per-item global hotkey code string (empty = clear).
-    SetItemHotkey { sequence: u32, code: String },
+    SetItemHotkey {
+        sequence: u32,
+        code: String,
+    },
     /// Toggle the auto-delete flag for a record.
-    SetAutoDelete { sequence: u32, enabled: bool },
+    SetAutoDelete {
+        sequence: u32,
+        enabled: bool,
+    },
     /// Move a record to the top of history (touch with current timestamp).
-    MoveToTop { sequence: u32, at_ms: i64 },
+    MoveToTop {
+        sequence: u32,
+        at_ms: i64,
+    },
     /// Move a record to the bottom of history.
-    MoveToBottom { sequence: u32 },
+    MoveToBottom {
+        sequence: u32,
+    },
     /// Replace the whole database with a backup file (after an automatic safety copy).
-    RestoreDatabase { path: PathBuf },
+    RestoreDatabase {
+        path: PathBuf,
+    },
     SetExpandedRaw(bool),
     SetHotkey(Hotkey),
     SetQuickSettings(crate::capture::QuickSettings),
@@ -169,7 +221,10 @@ fn delete_after_paste(
     flow: &mut FlowEngine,
     sequence: u32,
 ) -> Result<bool, String> {
-    if !flow.record(sequence).is_some_and(|record| record.auto_delete) {
+    if !flow
+        .record(sequence)
+        .is_some_and(|record| record.auto_delete)
+    {
         return Ok(false);
     }
     store
@@ -962,7 +1017,10 @@ fn run_worker(
                             Err(error) => format!("编辑失败：{error}"),
                         };
                     }
-                    WorkerCmd::CreateTextRecord { text, created_at_ms } => {
+                    WorkerCmd::CreateTextRecord {
+                        text,
+                        created_at_ms,
+                    } => {
                         status_note = match store.next_sequence() {
                             Ok(sequence) => {
                                 let payload = ClipboardPayload::Text(text.clone());
@@ -1122,16 +1180,18 @@ fn run_worker(
                         quick_settings = settings;
                         let _ = store.set_setting(
                             "quick_move_to_top",
-                            if settings.move_to_top_after_paste { "1" } else { "0" },
+                            if settings.move_to_top_after_paste {
+                                "1"
+                            } else {
+                                "0"
+                            },
                         );
                         let _ = store.set_setting(
                             "quick_display_lines",
                             &settings.display_lines.to_string(),
                         );
-                        let _ = store.set_setting(
-                            "quick_popup_position",
-                            settings.popup_position.as_key(),
-                        );
+                        let _ = store
+                            .set_setting("quick_popup_position", settings.popup_position.as_key());
                         let _ = store.set_setting(
                             "quick_always_on_top",
                             if settings.always_on_top { "1" } else { "0" },
@@ -1140,14 +1200,9 @@ fn run_worker(
                             "quick_auto_dismiss",
                             if settings.auto_dismiss { "1" } else { "0" },
                         );
-                        let _ = store.set_setting(
-                            "quick_opacity",
-                            &settings.opacity.to_string(),
-                        );
-                        let _ = store.set_setting(
-                            "quick_title_position",
-                            settings.title_position.as_key(),
-                        );
+                        let _ = store.set_setting("quick_opacity", &settings.opacity.to_string());
+                        let _ = store
+                            .set_setting("quick_title_position", settings.title_position.as_key());
                     }
                     WorkerCmd::RestoreDatabase { path } => {
                         let result = restore_database(
@@ -1425,7 +1480,9 @@ fn run_worker(
                                     // "自动删除": the record goes once it has been pasted.
                                     if let Some(sequence) = pasted {
                                         match delete_after_paste(&mut store, &mut flow, sequence) {
-                                            Ok(true) => status_note = "已按设置在粘贴后删除该记录".into(),
+                                            Ok(true) => {
+                                                status_note = "已按设置在粘贴后删除该记录".into()
+                                            }
                                             Ok(false) => {}
                                             Err(error) => status_note = error,
                                         }
@@ -2214,7 +2271,10 @@ mod tests {
         assert_eq!(report.records, 1);
         assert_eq!(store.count_records().unwrap(), 1);
         assert!(report.safety_copy.exists());
-        assert_eq!(Store::inspect_backup(&report.safety_copy).unwrap().records, 2);
+        assert_eq!(
+            Store::inspect_backup(&report.safety_copy).unwrap().records,
+            2
+        );
         assert_eq!(load_theme_mode(&store), ThemeMode::from_key("light"));
         let (max_items, _) = load_limits(&store);
         assert_eq!((max_items.enabled, max_items.count), (true, 50));
@@ -2263,7 +2323,9 @@ mod tests {
         names.sort();
         assert_eq!(names.len(), 6, "five copies plus the unrelated file");
         assert!(names.contains(&"my-own-backup.db".to_string()));
-        assert!(names.iter().all(|n| !n.contains("20261001") && !n.contains("20261003")));
+        assert!(names
+            .iter()
+            .all(|n| !n.contains("20261001") && !n.contains("20261003")));
         assert!(names.iter().any(|n| n.contains("20261008")));
         let _ = std::fs::remove_dir_all(dir);
     }

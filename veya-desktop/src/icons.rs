@@ -397,7 +397,10 @@ where
             background: Some(theme::bg(chip_bg)),
             border: Border {
                 color: if theme::is_light() {
-                    Color { a: 0.30, ..icon_color }
+                    Color {
+                        a: 0.30,
+                        ..icon_color
+                    }
                 } else {
                     Color::from_rgba(0.35, 0.50, 0.75, 0.22)
                 },
@@ -427,7 +430,10 @@ where
             background: Some(theme::bg(chip_bg)),
             border: Border {
                 color: if theme::is_light() {
-                    Color { a: 0.45, ..icon_color }
+                    Color {
+                        a: 0.45,
+                        ..icon_color
+                    }
                 } else {
                     Color::from_rgba(0.40, 0.70, 1.0, 0.4)
                 },

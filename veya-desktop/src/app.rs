@@ -962,7 +962,11 @@ impl App {
                 Task::none()
             }
             Message::QuickStartEditCard(sequence) => {
-                let card = self.state.cards.iter().find(|card| card.sequence == sequence);
+                let card = self
+                    .state
+                    .cards
+                    .iter()
+                    .find(|card| card.sequence == sequence);
                 let editable = card.is_some_and(quick::card_text_is_editable);
                 let value = card
                     .map(|card| card.content_excerpt.clone())
@@ -1483,8 +1487,9 @@ impl App {
                             "不透明度需为 {}–100 之间的整数（百分比）",
                             (QuickSettings::MIN_OPACITY * 100.0).round()
                         );
-                        self.quick_opacity_input =
-                            (self.state.quick_settings.opacity * 100.0).round().to_string();
+                        self.quick_opacity_input = (self.state.quick_settings.opacity * 100.0)
+                            .round()
+                            .to_string();
                     }
                 }
                 Task::none()

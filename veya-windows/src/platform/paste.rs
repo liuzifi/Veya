@@ -15,8 +15,7 @@ mod native {
         VIRTUAL_KEY, VK_CONTROL, VK_LWIN, VK_MENU, VK_RETURN, VK_RWIN, VK_SHIFT,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        GetClassNameW, GetForegroundWindow, GetWindowThreadProcessId, IsWindow,
-        SetForegroundWindow,
+        GetClassNameW, GetForegroundWindow, GetWindowThreadProcessId, IsWindow, SetForegroundWindow,
     };
 
     use super::PasteTarget;
@@ -43,7 +42,9 @@ mod native {
         let hwnd = unsafe { GetForegroundWindow() };
         let mut class = [0u16; 64];
         let len = unsafe { GetClassNameW(hwnd, &mut class) };
-        if len > 0 && super::is_shell_surface_class(&String::from_utf16_lossy(&class[..len as usize])) {
+        if len > 0
+            && super::is_shell_surface_class(&String::from_utf16_lossy(&class[..len as usize]))
+        {
             return None;
         }
         capture_target()
