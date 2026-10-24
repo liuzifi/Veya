@@ -307,80 +307,73 @@ pub fn window_event(
     }
 }
 
+/// Wheel "lines per notch" that Windows ships with, and that iced's own scroll speed
+/// already matches: `scrollable` moves 60 px per unit of a line delta, which is about
+/// three text lines of 20 px.
+#[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
+const DEFAULT_WHEEL_LINES: f32 = 3.0;
+
+/// Value of `SPI_GETWHEELSCROLLLINES` meaning "scroll one screen at a time"
+/// (`WHEEL_PAGESCROLL`).
+#[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
+const WHEEL_PAGESCROLL_LINES: u32 = u32::MAX;
+
+/// Pixels used when the user selects "scroll one screen at a time". This is a heuristic
+/// that approximates one viewport height; the scrollable clamps to its real bounds.
+#[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
+const PAGE_SCROLL_PX: f32 = 600.0;
+
+/// Turns one raw wheel delta into the scroll the user configured in Windows.
+///
+/// winit sends `LineDelta(0.0, ±1.0)` per notch without consulting the system setting.
+/// iced scrolls 60 px per unit, which is exactly right for the Windows default of three
+/// lines, so the setting scales that by `lines / 3`: 3 stays as it was, 1 scrolls a third
+/// of it, 10 scrolls three and a third times as far. (Multiplying by `lines` itself would
+/// make the default three times faster than before.) "One screen at a time" becomes a
+/// pixel delta of about a viewport. A setting of 0 is treated as 1.
+#[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
+fn wheel_scroll_delta(lines: u32, x: f32, y: f32) -> mouse::ScrollDelta {
+    if lines == WHEEL_PAGESCROLL_LINES {
+        mouse::ScrollDelta::Pixels {
+            x: x * PAGE_SCROLL_PX,
+            y: y * PAGE_SCROLL_PX,
+        }
+    } else {
+        let factor = lines.max(1) as f32 / DEFAULT_WHEEL_LINES;
+        mouse::ScrollDelta::Lines {
+            x: x * factor,
+            y: y * factor,
+        }
+    }
+}
+
 /// On Windows, applies the system "scroll lines per wheel notch" setting
-/// (SPI_GETWHEELSCROLLLINES) to the wheel delta.
-///
-/// winit 0.30 sends a raw `LineDelta(0.0, ±1.0)` per wheel notch without
-/// consulting the system setting. iced's `scrollable` widget then multiplies
-/// by `WHEEL_PX_PER_LINE = 120.0`, so one notch always scrolls 120 px
-/// regardless of how many lines the user configured.
-///
-/// This function reads `SPI_GETWHEELSCROLLLINES`:
-/// - Normal value N (1–u32::MAX-1): multiply the line delta by N so iced
-///   scrolls N × 120 px per notch (matching the user's "scroll N lines" setting).
-/// - `WHEEL_PAGESCROLL` (u32::MAX): the user chose "scroll one screen at a
-///   time".  We convert to a pixel-based delta so iced scrolls a full page
-///   rather than a fixed line count.
-///
-/// On any error the original delta is passed through unchanged.
+/// (`SPI_GETWHEELSCROLLLINES`) to the wheel delta; see [`wheel_scroll_delta`]. If the
+/// setting cannot be read the delta passes through unchanged.
 #[cfg(target_os = "windows")]
-fn apply_windows_wheel_scroll(
-    delta_x: f32,
-    delta_y: f32,
-) -> Option<Event> {
-    use winapi::um::winuser::{
-        SystemParametersInfoW, SPI_GETWHEELSCROLLLINES, WHEEL_PAGESCROLL,
-    };
+fn apply_windows_wheel_scroll(delta_x: f32, delta_y: f32) -> Option<Event> {
+    use winapi::um::winuser::{SystemParametersInfoW, SPI_GETWHEELSCROLLLINES};
 
-    /// Pixels used when the user selects "scroll one screen at a time".
-    /// This is a heuristic that approximates one viewport height; iced's
-    /// scrollable will clamp to the actual scroll bounds.
-    const PAGE_SCROLL_PX: f32 = 600.0;
-
-    /// Fallback when SPI_GETWHEELSCROLLLINES returns 0 (treat as 1 line).
-    const DEFAULT_LINES: u32 = 1;
-
-    // Safety: SystemParametersInfoW with SPI_GETWHEELSCROLLLINES writes a
-    // single u32 into the provided buffer.  All pointer arguments that are
-    // not needed are NULL, which is valid for this SPI code.
-    unsafe {
-        let mut lines: u32 = DEFAULT_LINES;
+    // Safety: SystemParametersInfoW with SPI_GETWHEELSCROLLLINES writes a single u32 into
+    // the provided buffer. The other pointer arguments are unused for this SPI code.
+    let lines = unsafe {
+        let mut lines: u32 = DEFAULT_WHEEL_LINES as u32;
         let result = SystemParametersInfoW(
             SPI_GETWHEELSCROLLLINES,
             0,
             &mut lines as *mut u32 as *mut _,
             0,
         );
-
-        if result == 0 {
-            // Call failed — fall back to the original passthrough.
-            return Some(Event::Mouse(mouse::Event::WheelScrolled {
-                delta: mouse::ScrollDelta::Lines {
-                    x: delta_x,
-                    y: delta_y,
-                },
-            }));
-        }
-
-        if lines == WHEEL_PAGESCROLL {
-            // "Scroll one screen at a time" — convert to pixel delta.
-            Some(Event::Mouse(mouse::Event::WheelScrolled {
-                delta: mouse::ScrollDelta::Pixels {
-                    x: delta_x * PAGE_SCROLL_PX,
-                    y: delta_y * PAGE_SCROLL_PX,
-                },
-            }))
-        } else {
-            // Normal "scroll N lines" — multiply the line delta.
-            let multiplier = lines.max(1) as f32;
-            Some(Event::Mouse(mouse::Event::WheelScrolled {
-                delta: mouse::ScrollDelta::Lines {
-                    x: delta_x * multiplier,
-                    y: delta_y * multiplier,
-                },
-            }))
-        }
-    }
+        (result != 0).then_some(lines)
+    };
+    let delta = match lines {
+        Some(lines) => wheel_scroll_delta(lines, delta_x, delta_y),
+        None => mouse::ScrollDelta::Lines {
+            x: delta_x,
+            y: delta_y,
+        },
+    };
+    Some(Event::Mouse(mouse::Event::WheelScrolled { delta }))
 }
 
 /// Converts a [`window::Level`] to a [`winit`] window level.
@@ -1221,4 +1214,44 @@ pub fn icon(icon: window::Icon) -> Option<winit::window::Icon> {
 // See: https://en.wikipedia.org/wiki/Private_Use_Areas
 fn is_private_use(c: char) -> bool {
     ('\u{E000}'..='\u{F8FF}').contains(&c)
+}
+
+#[cfg(test)]
+mod wheel_tests {
+    use super::*;
+
+    fn lines(delta: mouse::ScrollDelta) -> (f32, f32) {
+        match delta {
+            mouse::ScrollDelta::Lines { x, y } => (x, y),
+            mouse::ScrollDelta::Pixels { .. } => panic!("expected a line delta"),
+        }
+    }
+
+    #[test]
+    fn the_windows_default_keeps_the_scroll_speed_iced_already_had() {
+        assert_eq!(lines(wheel_scroll_delta(3, 0.0, 1.0)), (0.0, 1.0));
+        assert_eq!(lines(wheel_scroll_delta(3, 0.0, -1.0)), (0.0, -1.0));
+    }
+
+    #[test]
+    fn other_settings_scale_relative_to_the_default() {
+        assert!((lines(wheel_scroll_delta(1, 0.0, 1.0)).1 - 1.0 / 3.0).abs() < 1e-6);
+        assert!((lines(wheel_scroll_delta(6, 0.0, 1.0)).1 - 2.0).abs() < 1e-6);
+        assert!((lines(wheel_scroll_delta(10, 0.0, -1.0)).1 + 10.0 / 3.0).abs() < 1e-6);
+        assert_eq!(lines(wheel_scroll_delta(0, 0.0, 3.0)), (0.0, 1.0), "0 counts as 1");
+    }
+
+    #[test]
+    fn high_resolution_wheels_keep_their_fractional_notches() {
+        let (_, y) = lines(wheel_scroll_delta(3, 0.0, 0.25));
+        assert!((y - 0.25).abs() < 1e-6);
+    }
+
+    #[test]
+    fn page_scroll_becomes_a_pixel_delta() {
+        match wheel_scroll_delta(u32::MAX, 0.0, -1.0) {
+            mouse::ScrollDelta::Pixels { x, y } => assert_eq!((x, y), (0.0, -PAGE_SCROLL_PX)),
+            mouse::ScrollDelta::Lines { .. } => panic!("expected pixels"),
+        }
+    }
 }

@@ -1,6 +1,7 @@
 //! The hotkey picker reuses bounded worker history and typed clipboard replay.
 use super::history::card_menu_origin;
 use super::*;
+use crate::capture::QuickTitlePosition;
 use iced::widget::column;
 
 const QUICK_WIDTH: f32 = 440.0;
@@ -10,6 +11,8 @@ const ROW_HEIGHT: f32 = 52.0;
 /// Everything in the picker except the list: header, search box, group tabs, dividers,
 /// footer and padding. Slightly generous, so ten full rows fit even with larger fonts.
 const QUICK_CHROME_HEIGHT: f32 = 204.0;
+/// Extra height each additional preview line adds to a quick row.
+const QUICK_EXTRA_LINE_HEIGHT: f32 = 20.0;
 const QUICK_HEIGHT: f32 = QUICK_VISIBLE_ROWS as f32 * ROW_HEIGHT + QUICK_CHROME_HEIGHT;
 const QUICK_MENU_WIDTH: f32 = 200.0;
 const QUICK_MENU_ITEM_HEIGHT: f32 = 34.0;
@@ -22,6 +25,7 @@ const STRIP_WIDTH: f32 = 28.0;
 const NUMBERED_ROWS: usize = 10;
 const ROW_NUMBER_LABELS: [&str; NUMBERED_ROWS] = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"];
 const NUMBER_COLUMN_WIDTH: f32 = 22.0;
+const USED_MARKER_WIDTH: f32 = 3.0;
 /// Two presses on the strip closer than this toggle the always-on-top pin.
 const STRIP_DOUBLE_CLICK: std::time::Duration = std::time::Duration::from_millis(400);
 
@@ -150,23 +154,65 @@ impl App {
             let unfold = self.set_quick_folded(false);
             return Task::batch([query, unfold, activate_window(generation)]);
         }
+        let settings = self.state.quick_settings;
+        let window_height = self.quick_window_height();
+        let level = if settings.always_on_top {
+            set_window_level(iced::window::Level::AlwaysOnTop)
+        } else {
+            set_window_level(iced::window::Level::Normal)
+        };
+        apply_quick_opacity(settings.opacity);
+        // Where to anchor the panel: the target's text caret, the mouse cursor,
+        // or wherever the shared window was last shown (it simply stays put).
         #[cfg(windows)]
-        let placement =
-            veya_windows::platform::window_place::startup_placement(QUICK_WIDTH, QUICK_HEIGHT);
+        let (keep_position, placement) = match settings.popup_position {
+            crate::capture::QuickPopupPosition::InsertSymbol => (
+                false,
+                veya_windows::platform::window_place::caret_physical_position().and_then(
+                    |anchor| {
+                        veya_windows::platform::window_place::anchor_placement(
+                            anchor,
+                            QUICK_WIDTH,
+                            window_height,
+                        )
+                    },
+                ),
+            ),
+            crate::capture::QuickPopupPosition::Cursor => (
+                false,
+                veya_windows::platform::window_place::cursor_anchor_placement(
+                    QUICK_WIDTH,
+                    window_height,
+                ),
+            ),
+            crate::capture::QuickPopupPosition::LastPosition => (true, None),
+        };
         #[cfg(not(windows))]
-        let placement: Option<()> = None;
-        let size = iced::Size::new(QUICK_WIDTH, QUICK_HEIGHT);
+        let (keep_position, placement): (bool, Option<()>) = (false, None);
+        // A caret/cursor anchor that cannot be resolved falls back to centering
+        // on the cursor monitor; "last position" never moves the window.
+        #[cfg(windows)]
+        let placement = match placement {
+            Some(placement) => Some(placement),
+            None if keep_position => None,
+            None => {
+                let _ = keep_position;
+                veya_windows::platform::window_place::startup_placement(QUICK_WIDTH, window_height)
+            }
+        };
         #[cfg(windows)]
         let size = placement
             .map(|p| iced::Size::new(p.logical_size.0, p.logical_size.1))
-            .unwrap_or(size);
+            .unwrap_or(iced::Size::new(QUICK_WIDTH, window_height));
+        #[cfg(not(windows))]
+        let size = iced::Size::new(QUICK_WIDTH, window_height);
         let window = iced::window::get_latest().then(move |id| {
             let Some(id) = id else { return Task::none() };
             #[cfg(windows)]
             let position = placement.map(|p| p.physical_position);
             #[cfg(not(windows))]
             let position = {
-                let _ = placement;
+                let _ = (placement, keep_position);
                 None
             };
             iced::window::get_scale_factor(id).map(move |scale| Message::QuickPositioned {
@@ -184,7 +230,7 @@ impl App {
                 }),
             })
         });
-        Task::batch([query, window])
+        Task::batch([query, window, level])
     }
 
     fn restore_management_state(&mut self) -> Option<iced::Size> {
@@ -202,6 +248,7 @@ impl App {
         if self.quick.as_ref().is_some_and(|quick| quick.sending) {
             return Task::none();
         }
+        apply_quick_opacity(1.0);
         let leave = self.leave_strip_state();
         let size = self.restore_management_state();
         let generation = self.advance_window_generation();
@@ -224,12 +271,20 @@ impl App {
         let Some(quick) = &self.quick else {
             return Task::none();
         };
+        // Undo the position shift folding applied for this title-bar side.
         let shift = if quick.strip.folded {
-            shift_window_x(quick.strip.expanded_size.width - STRIP_WIDTH)
+            let size = quick.strip.expanded_size;
+            match self.state.quick_settings.title_position {
+                QuickTitlePosition::Top | QuickTitlePosition::Left => Task::none(),
+                QuickTitlePosition::Bottom => shift_window_y(-(size.height - STRIP_WIDTH)),
+                QuickTitlePosition::Right => shift_window_x(-(size.width - STRIP_WIDTH)),
+            }
         } else {
             Task::none()
         };
-        if quick.strip.pinned {
+        // Both the strip pin and the "always on top" setting raise the shared window; the
+        // manager must not inherit either.
+        if quick.strip.pinned || self.state.quick_settings.always_on_top {
             shift.chain(set_window_level(iced::window::Level::Normal))
         } else {
             shift
@@ -245,6 +300,7 @@ impl App {
         }
         let target = quick.target;
         self.quick_group_input = None;
+        apply_quick_opacity(1.0);
         let leave = self.leave_strip_state();
         let generation = self.advance_window_generation();
         let size = self.restore_management_state();
@@ -501,10 +557,11 @@ impl App {
         set_window_level(level)
     }
 
-    /// Fold the picker down to the right strip, or unfold it again. Folding
+    /// Fold the picker down to the title strip, or unfold it again. Folding
     /// pins the window, otherwise losing focus would close it immediately.
     pub(super) fn set_quick_folded(&mut self, folded: bool) -> Task<Message> {
         let window_size = self.window_size;
+        let title_position = self.state.quick_settings.title_position;
         let Some(quick) = &mut self.quick else {
             return Task::none();
         };
@@ -513,10 +570,40 @@ impl App {
         }
         quick.strip.folded = folded;
         if folded {
-            quick.strip.expanded_size = window_size;
-            let shift = window_size.width - STRIP_WIDTH;
-            let fold = resize_window(iced::Size::new(STRIP_WIDTH, window_size.height))
-                .chain(shift_window_x(shift));
+            // `window_size` follows the native window asynchronously. If the panel is folded
+            // again before an earlier resize was reported (a quick hover in and out), it still
+            // holds the strip size, which must not replace the real expanded size.
+            let measured = match title_position {
+                QuickTitlePosition::Top | QuickTitlePosition::Bottom => {
+                    window_size.height > STRIP_WIDTH + 1.0
+                }
+                QuickTitlePosition::Left | QuickTitlePosition::Right => {
+                    window_size.width > STRIP_WIDTH + 1.0
+                }
+            };
+            if measured || quick.strip.expanded_size.width <= 0.0 {
+                quick.strip.expanded_size = window_size;
+            }
+            let window_size = quick.strip.expanded_size;
+            // Resizing keeps the top-left corner; sides whose strip sits on the
+            // bottom/right edge shift the shrunk window back onto that edge.
+            let fold = match title_position {
+                QuickTitlePosition::Top => {
+                    resize_window(iced::Size::new(window_size.width, STRIP_WIDTH))
+                }
+                QuickTitlePosition::Bottom => resize_window(iced::Size::new(
+                    window_size.width,
+                    STRIP_WIDTH,
+                ))
+                .chain(shift_window_y(window_size.height - STRIP_WIDTH)),
+                QuickTitlePosition::Left => {
+                    resize_window(iced::Size::new(STRIP_WIDTH, window_size.height))
+                }
+                QuickTitlePosition::Right => {
+                    resize_window(iced::Size::new(STRIP_WIDTH, window_size.height))
+                        .chain(shift_window_x(window_size.width - STRIP_WIDTH))
+                }
+            };
             if quick.strip.pinned {
                 fold
             } else {
@@ -525,13 +612,67 @@ impl App {
             }
         } else {
             let size = quick.strip.expanded_size;
-            shift_window_x(-(size.width - STRIP_WIDTH)).chain(resize_window(size))
+            let unfold = match title_position {
+                QuickTitlePosition::Bottom => shift_window_y(-(size.height - STRIP_WIDTH))
+                    .chain(resize_window(size)),
+                QuickTitlePosition::Right => shift_window_x(-(size.width - STRIP_WIDTH))
+                    .chain(resize_window(size)),
+                _ => resize_window(size),
+            };
+            unfold
         }
     }
 
-    /// Focus loss closes the picker, unless it is pinned.
+    /// The fold button. While the panel is only open because the pointer rests on the strip,
+    /// pressing it keeps the panel open for good instead of folding it away again.
+    pub(super) fn quick_toggle_fold(&mut self) -> Task<Message> {
+        let Some(quick) = &mut self.quick else {
+            return Task::none();
+        };
+        if quick.strip.hover_expanded {
+            quick.strip.hover_expanded = false;
+            return Task::none();
+        }
+        let folded = quick.strip.folded;
+        self.set_quick_folded(!folded)
+    }
+
+    /// The pointer reached the strip of a folded panel: open it to show the entries.
+    pub(super) fn quick_hover_expand(&mut self) -> Task<Message> {
+        let Some(quick) = &mut self.quick else {
+            return Task::none();
+        };
+        if !quick.strip.folded {
+            return Task::none();
+        }
+        quick.strip.hover_expanded = true;
+        self.set_quick_folded(false)
+    }
+
+    /// The pointer left a hover-opened panel: fold it back.
+    pub(super) fn quick_hover_fold(&mut self) -> Task<Message> {
+        let Some(quick) = &mut self.quick else {
+            return Task::none();
+        };
+        if !quick.strip.hover_expanded {
+            return Task::none();
+        }
+        quick.strip.hover_expanded = false;
+        self.set_quick_folded(true)
+    }
+
+    /// Focus loss closes the picker, unless it is pinned or auto-dismiss is off.
     pub(super) fn quick_unfocused(&mut self) -> Task<Message> {
         if self.quick.as_ref().is_some_and(|quick| quick.strip.pinned) {
+            return Task::none();
+        }
+        if !self.state.quick_settings.auto_dismiss {
+            return Task::none();
+        }
+        if self.quick_edit.is_some() {
+            return Task::none();
+        }
+        if self.quick_properties.is_some() {
             return Task::none();
         }
         if self.quick_group_input.is_some() {
@@ -597,11 +738,15 @@ impl App {
             self.request_history_load_more();
         }
         // Each row has a fixed height; keep the keyboard selection in view.
-        let viewport = (self.window_size.height - QUICK_CHROME_HEIGHT).max(ROW_HEIGHT);
-        let content = sequences.len() as f32 * ROW_HEIGHT;
+        let row_height = quick_row_height(self.state.quick_settings.display_lines);
+        let viewport = (self.window_size.height
+            - QUICK_CHROME_HEIGHT
+            - self.quick_strip_extra_height())
+        .max(row_height);
+        let content = sequences.len() as f32 * row_height;
         let overflow = (content - viewport).max(1.0);
         let offset =
-            (index as f32 * ROW_HEIGHT - viewport * 0.5 + ROW_HEIGHT * 0.5).clamp(0.0, overflow);
+            (index as f32 * row_height - viewport * 0.5 + row_height * 0.5).clamp(0.0, overflow);
         scrollable::snap_to(
             quick_scroll_id(),
             scrollable::RelativeOffset {
@@ -611,12 +756,34 @@ impl App {
         )
     }
 
+    /// Extra vertical space the horizontal title strip takes from the list
+    /// viewport (zero for the vertical left/right strips).
+    fn quick_strip_extra_height(&self) -> f32 {
+        match self.state.quick_settings.title_position {
+            QuickTitlePosition::Top | QuickTitlePosition::Bottom => STRIP_WIDTH,
+            QuickTitlePosition::Left | QuickTitlePosition::Right => 0.0,
+        }
+    }
+
+    /// Full logical height of the quick window for the configured settings.
+    fn quick_window_height(&self) -> f32 {
+        let lines = self.state.quick_settings.display_lines.max(1);
+        let extra = self.quick_strip_extra_height();
+        if lines <= 1 {
+            QUICK_HEIGHT + extra
+        } else {
+            QUICK_VISIBLE_ROWS as f32 * quick_row_height(lines) + QUICK_CHROME_HEIGHT + extra
+        }
+    }
+
     pub(super) fn quick_view(&self) -> Element<'_, Message> {
         let Some(quick) = &self.quick else {
             return Space::new(0, 0).into();
         };
         let busy = quick.busy();
         let pending = self.history_list_pending();
+        let lines = self.state.quick_settings.display_lines.max(1);
+        let row_height = quick_row_height(lines);
         let search: Element<'_, Message> = if let Some(input) = &self.quick_group_input {
             let field = text_input("输入分组名称…", &input.value)
                 .id(group_input_id())
@@ -693,11 +860,21 @@ impl App {
                         .into(),
                     None => Space::with_width(Length::Fixed(NUMBER_COLUMN_WIDTH)).into(),
                 };
+                // A red bar at the left edge marks a row that was already pasted. Rows without
+                // one keep an empty slot so the columns line up.
+                let used_marker: Element<'_, Message> = if card.has_paste_activity {
+                    container(Space::new(Length::Fixed(USED_MARKER_WIDTH), Length::Fill))
+                        .style(theme::used_marker_style)
+                        .into()
+                } else {
+                    Space::with_width(Length::Fixed(USED_MARKER_WIDTH)).into()
+                };
                 let content = row![
+                    used_marker,
                     number,
                     history::card_leading_visual(card, 32.0),
                     column![
-                        body(compact_preview(&card.content_preview, 46))
+                        body(quick_preview_lines(&card.content_preview, lines))
                             .size(13)
                             .shaping(text::Shaping::Advanced),
                         metadata
@@ -706,15 +883,15 @@ impl App {
                     .width(Length::Fill),
                 ]
                 .spacing(8)
+                .height(Length::Fill)
                 .align_y(Alignment::Center);
                 let row = button(content)
                     .width(Length::Fill)
-                    .height(ROW_HEIGHT)
+                    .height(row_height)
                     .padding(8)
                     .style(theme::card_button_quick(
                         self.state.selected == Some(card.sequence),
                         index % 2 == 1,
-                        card.has_paste_activity,
                     ));
                 let row: Element<'_, Message> = if busy {
                     mouse_area(row).into()
@@ -766,11 +943,24 @@ impl App {
             .padding(14)
             .width(Length::Fill)
             .height(Length::Fill);
-        let base: Element<'_, Message> = container(row![left, theme::vdivider(), strip])
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .style(theme::shell_style)
-            .into();
+        let base: Element<'_, Message> = match self.state.quick_settings.title_position {
+            QuickTitlePosition::Top => container(
+                column![strip, theme::hdivider(), left]
+                    .width(Length::Fill)
+                    .height(Length::Fill),
+            ),
+            QuickTitlePosition::Bottom => container(
+                column![left, theme::hdivider(), strip]
+                    .width(Length::Fill)
+                    .height(Length::Fill),
+            ),
+            QuickTitlePosition::Left => container(row![strip, theme::vdivider(), left]),
+            QuickTitlePosition::Right => container(row![left, theme::vdivider(), strip]),
+        }
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(theme::shell_style)
+        .into();
         // When the panel was auto-expanded by hovering over the folded strip,
         // wrap the whole panel so that moving the mouse off it folds it back.
         let base = if quick.strip.hover_expanded {
@@ -778,7 +968,7 @@ impl App {
         } else {
             base
         };
-        let overlay: Element<'_, Message> = self
+        let card_overlay: Element<'_, Message> = self
             .card_menu
             .and_then(|menu| {
                 self.state
@@ -788,11 +978,14 @@ impl App {
                     .map(|card| self.quick_card_menu(card, menu.position))
             })
             .unwrap_or_else(|| Space::new(Length::Fill, Length::Fill).into());
-        stack([base, overlay]).into()
+        let edit_overlay: Element<'_, Message> = self.quick_edit_overlay();
+        let props_overlay: Element<'_, Message> = self.quick_properties_overlay();
+        stack([base, card_overlay, edit_overlay, props_overlay]).into()
     }
 
-    /// Right-hand strip: close and fold buttons on top, the title below. Blank
-    /// space drags the window; a quick double press pins it on top.
+    /// Title strip: close and fold buttons, then the draggable title. Blank
+    /// space drags the window; a quick double press pins it on top. The strip
+    /// lays out according to the configured title-bar position.
     fn quick_strip(&self, quick: &QuickPanel) -> Element<'_, Message> {
         let pinned = quick.strip.pinned;
         let folded = quick.strip.folded;
@@ -801,33 +994,69 @@ impl App {
             .padding(pad(5.0, 5.0, 5.0, 5.0))
             .style(theme::win_button)
             .on_press(Message::QuickDismiss { restore: true });
-        let fold = button(meta(if folded { "<<" } else { ">>" }).size(13).color(tint))
+        let fold_label = match (self.state.quick_settings.title_position, folded) {
+            (QuickTitlePosition::Top, false) => "^",
+            (QuickTitlePosition::Top, true) => "v",
+            (QuickTitlePosition::Bottom, false) => "v",
+            (QuickTitlePosition::Bottom, true) => "^",
+            (QuickTitlePosition::Left, false) => "<<",
+            (QuickTitlePosition::Left, true) => ">>",
+            (_, false) => ">>",
+            (_, true) => "<<",
+        };
+        let fold = button(meta(fold_label).size(13).color(tint))
             .padding(pad(2.0, 3.0, 2.0, 3.0))
             .style(theme::win_button)
             .on_press(Message::QuickToggleFold);
-        let title = column![
-            vertical_text("Veya", tint),
-            Space::with_height(8),
-            vertical_text(if pinned { "窗口置顶" } else { "快捷粘贴" }, tint),
-        ]
-        .align_x(Alignment::Center);
-        let blank = mouse_area(
-            container(title)
-                .padding(pad(10.0, 0.0, 0.0, 0.0))
-                .center_x(Length::Fill)
-                .height(Length::Fill),
-        )
-        .on_press(Message::QuickStripPress)
-        .on_enter(Message::QuickHoverExpand);
-        container(
-            column![close, fold, blank]
-                .align_x(Alignment::Center)
-                .spacing(2)
-                .padding(pad(6.0, 0.0, 6.0, 0.0)),
-        )
-        .width(Length::Fixed(STRIP_WIDTH))
-        .height(Length::Fill)
-        .into()
+        match self.state.quick_settings.title_position {
+            QuickTitlePosition::Top | QuickTitlePosition::Bottom => {
+                let title = meta(if pinned { "Veya · 窗口置顶" } else { "Veya · 快捷粘贴" })
+                    .size(12)
+                    .color(tint);
+                let blank = mouse_area(
+                    container(title)
+                        .width(Length::Fill)
+                        .height(Length::Fill)
+                        .align_y(Alignment::Center),
+                )
+                .on_press(Message::QuickStripPress)
+                .on_enter(Message::QuickHoverExpand);
+                container(
+                    row![close, fold, blank]
+                        .align_y(Alignment::Center)
+                        .spacing(6)
+                        .padding(pad(0.0, 6.0, 0.0, 8.0)),
+                )
+                .width(Length::Fill)
+                .height(Length::Fixed(STRIP_WIDTH))
+                .into()
+            }
+            _ => {
+                let title = column![
+                    vertical_text("Veya", tint),
+                    Space::with_height(8),
+                    vertical_text(if pinned { "窗口置顶" } else { "快捷粘贴" }, tint),
+                ]
+                .align_x(Alignment::Center);
+                let blank = mouse_area(
+                    container(title)
+                        .padding(pad(10.0, 0.0, 0.0, 0.0))
+                        .center_x(Length::Fill)
+                        .height(Length::Fill),
+                )
+                .on_press(Message::QuickStripPress)
+                .on_enter(Message::QuickHoverExpand);
+                container(
+                    column![close, fold, blank]
+                        .align_x(Alignment::Center)
+                        .spacing(2)
+                        .padding(pad(6.0, 0.0, 6.0, 0.0)),
+                )
+                .width(Length::Fixed(STRIP_WIDTH))
+                .height(Length::Fill)
+                .into()
+            }
+        }
     }
 
     /// Horizontal group-tab row: "全部" + one chip per group + a "+ 新建" button.
@@ -901,7 +1130,136 @@ impl App {
             .on_press(message)
             .style(theme::context_menu_item(false))
         };
+        let menu_item_danger = |icon: Icon, label: String, message: Message| {
+            button(
+                row![
+                    icons::icon(icon, theme::DANGER(), 14.0),
+                    text(label).size(12).wrapping(text::Wrapping::None),
+                ]
+                .spacing(9)
+                .align_y(Alignment::Center),
+            )
+            .width(Length::Fill)
+            .padding(pad(8.0, 10.0, 8.0, 10.0))
+            .on_press(message)
+            .style(theme::context_menu_item(true))
+        };
+        let menu_item_disabled = |icon: Icon, label: String| {
+            button(
+                row![
+                    icons::icon(icon, theme::FAINT(), 14.0),
+                    text(label).size(12).wrapping(text::Wrapping::None),
+                ]
+                .spacing(9)
+                .align_y(Alignment::Center),
+            )
+            .width(Length::Fill)
+            .padding(pad(8.0, 10.0, 8.0, 10.0))
+            .style(theme::context_menu_item(false))
+        };
         let mut items: Vec<Element<'_, Message>> = Vec::new();
+        // ── 删除 ──
+        items.push(
+            menu_item_danger(
+                Icon::Trash,
+                "删除".to_string(),
+                Message::QuickDeleteCard(card.sequence),
+            )
+            .into(),
+        );
+        // ── 编辑（仅文本条目可用） ──
+        let is_text = matches!(card.payload, CardPayloadView::Text);
+        if is_text && card_text_is_editable(card) {
+            items.push(
+                menu_item(
+                    Icon::Edit,
+                    "编辑".to_string(),
+                    Message::QuickStartEditCard(card.sequence),
+                )
+                .into(),
+            );
+        } else {
+            let label = if is_text { "编辑（内容过长）" } else { "编辑（仅文本）" };
+            items.push(menu_item_disabled(Icon::Edit, label.to_string()).into());
+        }
+        // ── 新建 ──
+        items.push(
+            menu_item(
+                Icon::Plus,
+                "新建文本".to_string(),
+                Message::QuickStartCreateCard,
+            )
+            .into(),
+        );
+        // ── 属性 ──
+        items.push(
+            menu_item(
+                Icon::Settings,
+                "属性".to_string(),
+                Message::QuickOpenProperties(card.sequence),
+            )
+            .into(),
+        );
+        // ── 排序 ──
+        items.push(
+            menu_item(
+                Icon::Maximize,
+                "移到顶部".to_string(),
+                Message::QuickMoveToTop(card.sequence),
+            )
+            .into(),
+        );
+        items.push(
+            menu_item(
+                Icon::Minimize,
+                "移到底部".to_string(),
+                Message::QuickMoveToBottom(card.sequence),
+            )
+            .into(),
+        );
+        match card.pin_rank {
+            0 => {
+                items.push(
+                    menu_item(
+                        Icon::Pin,
+                        "固定到顶部".to_string(),
+                        Message::QuickSetPinRank(card.sequence, 1),
+                    )
+                    .into(),
+                );
+                items.push(
+                    menu_item(
+                        Icon::Pin,
+                        "固定到底部".to_string(),
+                        Message::QuickSetPinRank(card.sequence, 2),
+                    )
+                    .into(),
+                );
+            }
+            1 => {
+                items.push(
+                    menu_item(
+                        Icon::Close,
+                        "移除固定".to_string(),
+                        Message::QuickSetPinRank(card.sequence, 0),
+                    )
+                    .into(),
+                );
+            }
+            _ => {
+                items.push(
+                    menu_item(
+                        Icon::Close,
+                        "移除固定".to_string(),
+                        Message::QuickSetPinRank(card.sequence, 0),
+                    )
+                    .into(),
+                );
+            }
+        }
+        // ── 分隔线 ──
+        items.push(theme::hdivider().into());
+        // ── 分组操作 ──
         if let Some(current) = self
             .quick_group_sel
             .and_then(|id| self.state.groups.iter().find(|group| group.id == id))
@@ -987,6 +1345,212 @@ impl App {
             .on_press(Message::QuickCloseCardMenu);
         stack([dismiss.into(), positioned.into()]).into()
     }
+
+    /// Inline edit overlay: a text input that pre-fills card content for editing,
+    /// or starts empty for creating a new text record. Enter submits, Esc cancels.
+    fn quick_edit_overlay(&self) -> Element<'_, Message> {
+        let Some(edit) = &self.quick_edit else {
+            return Space::new(Length::Fill, Length::Fill).into();
+        };
+        let title = if edit.sequence.is_some() {
+            "编辑内容"
+        } else {
+            "新建文本"
+        };
+        let field = text_input("输入文本内容…", &edit.value)
+            .id(quick_edit_input_id())
+            .size(14)
+            .padding(10)
+            .style(theme::field_style)
+            .on_input(Message::QuickEditCardInput)
+            .on_submit(Message::QuickEditCardSubmit);
+        let cancel_btn = button(text("取消").size(13))
+            .padding(pad(8.0, 14.0, 8.0, 14.0))
+            .style(theme::action_button)
+            .on_press(Message::QuickEditCardCancel);
+        let submit_btn = button(text("保存").size(13))
+            .padding(pad(8.0, 14.0, 8.0, 14.0))
+            .style(theme::primary_button)
+            .on_press(Message::QuickEditCardSubmit);
+        let mut content = column![field].spacing(8);
+        if let Some(err) = &self.quick_edit_error {
+            content = content.push(meta(err.clone()).size(12).color(theme::DANGER()));
+        }
+        content = content.push(
+            row![Space::with_width(Length::Fill), cancel_btn, submit_btn]
+                .spacing(8)
+                .align_y(Alignment::Center),
+        );
+        let panel = container(
+            column![meta(title).size(14), content]
+                .spacing(10)
+                .padding(pad(16.0, 16.0, 16.0, 16.0)),
+        )
+        .width(Length::Fixed(340.0))
+        .style(theme::modal_panel_style);
+        let centered = container(panel)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_x(iced::alignment::Horizontal::Center)
+            .align_y(iced::alignment::Vertical::Center)
+            .style(theme::modal_backdrop_style);
+        let dismiss = mouse_area(Space::new(Length::Fill, Length::Fill))
+            .on_press(Message::QuickEditCardCancel);
+        stack([dismiss.into(), centered.into()]).into()
+    }
+
+    /// Properties overlay: per-item hotkey, auto-delete toggle, pin position.
+    fn quick_properties_overlay(&self) -> Element<'_, Message> {
+        let Some(seq) = self.quick_properties else {
+            return Space::new(Length::Fill, Length::Fill).into();
+        };
+        let card = self
+            .state
+            .cards
+            .iter()
+            .find(|c| c.sequence == seq);
+        let card = match card {
+            Some(c) => c,
+            None => {
+                return Space::new(Length::Fill, Length::Fill).into();
+            }
+        };
+        // Auto-delete toggle
+        let auto_delete_btn = button(
+            row![
+                icons::icon(Icon::Trash, theme::MUTED(), 14.0),
+                text("粘贴后自动删除").size(13),
+                Space::with_width(Length::Fill),
+                if card.auto_delete {
+                    meta("已开启").color(theme::OK())
+                } else {
+                    meta("关闭").color(theme::FAINT())
+                },
+            ]
+            .spacing(9)
+            .align_y(Alignment::Center),
+        )
+        .width(Length::Fill)
+        .padding(pad(8.0, 10.0, 8.0, 10.0))
+        .style(theme::context_menu_item(false))
+        .on_press(Message::QuickToggleAutoDelete(seq, !card.auto_delete));
+        // Pin position radio-style buttons
+        let pin_label = section_label("置顶模式");
+        let pin_unpinned = button(
+            row![
+                text("不固定").size(13),
+                Space::with_width(Length::Fill),
+                if card.pin_rank == 0 {
+                    meta("●").color(theme::ACCENT())
+                } else {
+                    meta("○").color(theme::FAINT())
+                },
+            ]
+            .spacing(9)
+            .align_y(Alignment::Center),
+        )
+        .width(Length::Fill)
+        .padding(pad(8.0, 10.0, 8.0, 10.0))
+        .style(theme::context_menu_item(false))
+        .on_press(Message::QuickSetPinRank(seq, 0));
+        let pin_top = button(
+            row![
+                icons::icon(Icon::Maximize, theme::MUTED(), 14.0),
+                text("固定到顶部").size(13),
+                Space::with_width(Length::Fill),
+                if card.pin_rank == 1 {
+                    meta("●").color(theme::ACCENT())
+                } else {
+                    meta("○").color(theme::FAINT())
+                },
+            ]
+            .spacing(9)
+            .align_y(Alignment::Center),
+        )
+        .width(Length::Fill)
+        .padding(pad(8.0, 10.0, 8.0, 10.0))
+        .style(theme::context_menu_item(false))
+        .on_press(Message::QuickSetPinRank(seq, 1));
+        let pin_bottom = button(
+            row![
+                icons::icon(Icon::Minimize, theme::MUTED(), 14.0),
+                text("固定到底部").size(13),
+                Space::with_width(Length::Fill),
+                if card.pin_rank == 2 {
+                    meta("●").color(theme::ACCENT())
+                } else {
+                    meta("○").color(theme::FAINT())
+                },
+            ]
+            .spacing(9)
+            .align_y(Alignment::Center),
+        )
+        .width(Length::Fill)
+        .padding(pad(8.0, 10.0, 8.0, 10.0))
+        .style(theme::context_menu_item(false))
+        .on_press(Message::QuickSetPinRank(seq, 2));
+        // Item hotkey display (read-only — editing is done via the item-hotkey
+        // input in the settings page; here we just show the current value and
+        // a button to clear it)
+        let hotkey_display: String = if card.item_hotkey.is_empty() {
+            "未设置".to_string()
+        } else {
+            format!("{}（点击清除）", card.item_hotkey)
+        };
+        let hotkey_btn = button(
+            row![
+                icons::icon(Icon::Settings, theme::MUTED(), 14.0),
+                text("条目快捷键").size(13),
+                Space::with_width(Length::Fill),
+                meta(hotkey_display).size(12).color(theme::MUTED()),
+            ]
+            .spacing(9)
+            .align_y(Alignment::Center),
+        )
+        .width(Length::Fill)
+        .padding(pad(8.0, 10.0, 8.0, 10.0))
+        .style(theme::context_menu_item(false));
+        // Pressing the row clears an existing hotkey; with none set there is nothing to do.
+        let hotkey_btn = if card.item_hotkey.is_empty() {
+            hotkey_btn
+        } else {
+            hotkey_btn.on_press(Message::QuickSetItemHotkey(seq, String::new()))
+        };
+        let close_btn = button(text("关闭").size(13))
+            .padding(pad(8.0, 14.0, 8.0, 14.0))
+            .style(theme::action_button)
+            .on_press(Message::QuickCloseProperties);
+        let content = column![
+            meta("条目属性").size(14),
+            theme::hdivider(),
+            auto_delete_btn,
+            theme::hdivider(),
+            pin_label,
+            pin_unpinned,
+            pin_top,
+            pin_bottom,
+            theme::hdivider(),
+            hotkey_btn,
+            theme::hdivider(),
+            row![Space::with_width(Length::Fill), close_btn]
+                .spacing(8)
+                .align_y(Alignment::Center),
+        ]
+        .spacing(2)
+        .padding(pad(14.0, 14.0, 14.0, 14.0));
+        let panel = container(content)
+            .width(Length::Fixed(300.0))
+            .style(theme::modal_panel_style);
+        let centered = container(panel)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_x(iced::alignment::Horizontal::Center)
+            .align_y(iced::alignment::Vertical::Center)
+            .style(theme::modal_backdrop_style);
+        let dismiss = mouse_area(Space::new(Length::Fill, Length::Fill))
+            .on_press(Message::QuickCloseProperties);
+        stack([dismiss.into(), centered.into()]).into()
+    }
 }
 
 /// Text laid out top to bottom, one glyph per line (iced cannot rotate text).
@@ -1001,7 +1565,7 @@ fn vertical_text<'a>(label: &'a str, color: Color) -> Element<'a, Message> {
     .into()
 }
 
-fn set_window_level(level: iced::window::Level) -> Task<Message> {
+pub(super) fn set_window_level(level: iced::window::Level) -> Task<Message> {
     iced::window::get_latest().then(move |id| match id {
         Some(id) => iced::window::change_level(id, level),
         None => Task::none(),
@@ -1029,10 +1593,79 @@ fn shift_window_x(dx: f32) -> Task<Message> {
     })
 }
 
+/// Move the window vertically by `dy` logical pixels (keeps the bottom edge in
+/// place while folding and unfolding a bottom title strip).
+fn shift_window_y(dy: f32) -> Task<Message> {
+    iced::window::get_latest().then(move |id| {
+        let Some(id) = id else {
+            return Task::none();
+        };
+        iced::window::get_position(id).then(move |position| match position {
+            Some(at) => iced::window::move_to(id, iced::Point::new(at.x, at.y + dy)),
+            None => Task::none(),
+        })
+    })
+}
+
+/// Row height for the configured number of preview lines per card.
+fn quick_row_height(lines: u32) -> f32 {
+    ROW_HEIGHT + lines.saturating_sub(1) as f32 * QUICK_EXTRA_LINE_HEIGHT
+}
+
+/// Preview text clipped to `lines` lines, each line bounded like the single
+/// line preview, with an ellipsis on the last shown line when more follows.
+fn quick_preview_lines(content: &str, lines: u32) -> String {
+    if lines <= 1 {
+        return compact_preview(content, 46);
+    }
+    let mut segments: Vec<String> = content
+        .split('\n')
+        .map(|line| line.trim_end_matches('\r').to_string())
+        .collect();
+    let more = segments.len() > lines as usize;
+    segments.truncate(lines as usize);
+    let last = segments.len() - 1;
+    for segment in segments.iter_mut() {
+        *segment = compact_preview(segment, 46);
+    }
+    if more && !segments[last].ends_with('…') {
+        segments[last].push('…');
+    }
+    segments.join("\n")
+}
+
+/// Apply the configured quick panel opacity to the shared native window.
+/// Runs on a fire-and-forget thread like the other platform tweaks.
+pub(super) fn apply_quick_opacity(opacity: f32) {
+    #[cfg(windows)]
+    {
+        let opacity = opacity.clamp(QuickSettings::MIN_OPACITY, QuickSettings::MAX_OPACITY);
+        let _ = std::thread::Builder::new()
+            .name("veya-opacity".into())
+            .spawn(move || {
+                if opacity < 1.0 {
+                    veya_windows::platform::window_place::set_window_opacity(opacity);
+                } else {
+                    veya_windows::platform::window_place::clear_window_opacity();
+                }
+            });
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = opacity;
+    }
+}
+
 /// Height of a card menu with `items` entries, including its padding.
 fn quick_menu_content_height(items: usize) -> f32 {
     let items = items as f32;
     items * QUICK_MENU_ITEM_HEIGHT + (items - 1.0).max(0.0) * 2.0 + 8.0
+}
+
+/// The edit box is filled from the card's bounded preview excerpt, so only a text that fits
+/// entirely in it may be edited; saving a longer one would silently drop its tail.
+pub(super) fn card_text_is_editable(card: &crate::capture::CardView) -> bool {
+    card.content_chars <= card.content_excerpt.chars().count()
 }
 
 fn quick_scroll_id() -> scrollable::Id {
@@ -1161,11 +1794,16 @@ pub(in crate::app) mod tests {
             exclude_input: String::new(),
             max_items_input: String::new(),
             expiry_days_input: String::new(),
+            quick_lines_input: String::new(),
+            quick_opacity_input: String::new(),
             limit_inputs_synced: true,
             detail_menu_open: false,
             card_menu: None,
             quick_group_sel: None,
             quick_group_input: None,
+            quick_edit: None,
+            quick_properties: None,
+            quick_edit_error: None,
             cursor_position: iced::Point::ORIGIN,
             window_size: iced::Size::new(1080.0, 700.0),
             content_modal_for: None,
@@ -1201,6 +1839,9 @@ pub(in crate::app) mod tests {
                 source_confidence: veya_core::SourceConfidence::Exact,
                 created_at_ms: 1,
                 pinned: false,
+                pin_rank: 0,
+                item_hotkey: String::new(),
+                auto_delete: false,
                 pastes: Vec::new(),
             },
             raw_sequences: vec![1],
@@ -1878,5 +2519,98 @@ pub(in crate::app) mod tests {
         let _ = app.update(Message::QuickHoverExpand);
         assert!(!strip(&app).folded);
         assert!(!strip(&app).hover_expanded);
+    }
+
+    #[test]
+    fn a_stale_window_size_never_replaces_the_real_expanded_size() {
+        let full = iced::Size::new(QUICK_WIDTH, QUICK_HEIGHT);
+        for position in [
+            QuickTitlePosition::Top,
+            QuickTitlePosition::Bottom,
+            QuickTitlePosition::Left,
+            QuickTitlePosition::Right,
+        ] {
+            let mut app = quick_app();
+            app.state.quick_settings.title_position = position;
+            app.window_size = full;
+            let _ = app.update(Message::QuickToggleFold);
+            let _ = app.update(Message::QuickHoverExpand);
+            // The pointer leaves before the native window reported that it is open again,
+            // so the size the app still knows is the folded one.
+            app.window_size = match position {
+                QuickTitlePosition::Top | QuickTitlePosition::Bottom => {
+                    iced::Size::new(QUICK_WIDTH, STRIP_WIDTH)
+                }
+                QuickTitlePosition::Left | QuickTitlePosition::Right => {
+                    iced::Size::new(STRIP_WIDTH, QUICK_HEIGHT)
+                }
+            };
+            let _ = app.update(Message::QuickHoverFold);
+            assert!(strip(&app).folded);
+            assert_eq!(strip(&app).expanded_size, full, "{position:?}");
+            let _ = app.update(Message::QuickHoverExpand);
+            assert_eq!(strip(&app).expanded_size, full, "{position:?}");
+        }
+    }
+
+    #[test]
+    fn the_fold_button_keeps_a_hover_opened_panel_open() {
+        let mut app = quick_app();
+        app.window_size = iced::Size::new(QUICK_WIDTH, QUICK_HEIGHT);
+        let _ = app.update(Message::QuickToggleFold);
+        let _ = app.update(Message::QuickHoverExpand);
+        let _ = app.update(Message::QuickToggleFold);
+        assert!(!strip(&app).folded && !strip(&app).hover_expanded);
+        // Leaving the panel no longer folds it.
+        let _ = app.update(Message::QuickHoverFold);
+        assert!(!strip(&app).folded);
+        // The next press folds it as usual.
+        let _ = app.update(Message::QuickToggleFold);
+        assert!(strip(&app).folded);
+    }
+
+    fn short_card(sequence: u32, text: &str) -> crate::capture::CardView {
+        let summary = veya_core::HistorySummary {
+            representative: veya_core::HistoryRecord {
+                sequence,
+                content: text.into(),
+                payload: veya_core::HistoryPayload::Text,
+                content_hash: format!("hash-{sequence}"),
+                source_app: "editor.exe".into(),
+                source_window: "source".into(),
+                source_confidence: veya_core::SourceConfidence::Exact,
+                created_at_ms: 1,
+                pinned: false,
+                pin_rank: 0,
+                item_hotkey: String::new(),
+                auto_delete: false,
+                pastes: Vec::new(),
+            },
+            raw_sequences: vec![sequence],
+            used_in: Vec::new(),
+            last_created_at_ms: 1,
+        };
+        crate::capture::card_view_from_summary(&summary, None)
+    }
+
+    #[test]
+    fn a_text_longer_than_the_preview_excerpt_cannot_be_edited_and_is_not_overwritten() {
+        let mut app = quick_app();
+        // Card 1 is 1004 characters; the excerpt that fills the edit box holds 512.
+        assert!(!card_text_is_editable(&app.state.cards[0]));
+        let _ = app.update(Message::QuickStartEditCard(1));
+        assert!(app.quick_edit.is_none(), "no edit box for a text it cannot show in full");
+        assert!(app.quick.as_ref().unwrap().error.is_some());
+    }
+
+    #[test]
+    fn a_short_text_opens_the_edit_box_with_its_full_content() {
+        let mut app = quick_app();
+        app.state.cards = vec![short_card(7, "hello 世界")].into();
+        assert!(card_text_is_editable(&app.state.cards[0]));
+        let _ = app.update(Message::QuickStartEditCard(7));
+        let edit = app.quick_edit.as_ref().expect("edit box opened");
+        assert_eq!((edit.sequence, edit.value.as_str()), (Some(7), "hello 世界"));
+        assert!(app.quick.as_ref().unwrap().error.is_none());
     }
 }

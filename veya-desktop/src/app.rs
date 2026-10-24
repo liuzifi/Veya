@@ -14,8 +14,8 @@ use std::collections::HashMap;
 use std::sync::OnceLock;
 
 use crate::capture::{
-    CardPayloadView, CardView, ExpiryConfig, HistoryFilter, HistoryQuery, MaxItemsConfig, SharedUi,
-    ThemeMode, UiState,
+    CardPayloadView, CardView, ExpiryConfig, HistoryFilter, HistoryQuery, MaxItemsConfig,
+    QuickSettings, SharedUi, ThemeMode, UiState,
 };
 use crate::format::{self, ContentKind};
 use crate::icons::{self, Icon};
@@ -269,12 +269,22 @@ pub struct App {
     exclude_input: String,
     max_items_input: String,
     expiry_days_input: String,
+    /// Draft text for the quick panel display-lines box.
+    quick_lines_input: String,
+    /// Draft text for the quick panel opacity box (percent).
+    quick_opacity_input: String,
     /// The number boxes take their first value from the saved settings loaded by the worker.
     limit_inputs_synced: bool,
     detail_menu_open: bool,
     card_menu: Option<CardMenu>,
     quick_group_sel: Option<i64>,
     quick_group_input: Option<QuickGroupInput>,
+    /// Inline edit box for editing or creating a text card in the quick panel.
+    quick_edit: Option<QuickEditState>,
+    /// Sequence of the card whose properties panel is open.
+    quick_properties: Option<u32>,
+    /// Error message for the quick edit box (e.g. "快捷键已被占用").
+    quick_edit_error: Option<String>,
     cursor_position: iced::Point,
     window_size: iced::Size,
     content_modal_for: Option<u32>,
@@ -293,6 +303,14 @@ pub struct App {
 #[derive(Debug, Clone)]
 struct QuickGroupInput {
     mode: QuickGroupInputMode,
+    value: String,
+}
+
+/// Inline edit-box state shared by the edit and create flows.
+#[derive(Debug, Clone)]
+struct QuickEditState {
+    /// `Some(seq)` = editing an existing card; `None` = creating a new one.
+    sequence: Option<u32>,
     value: String,
 }
 
@@ -349,6 +367,32 @@ pub enum Message {
         group_id: i64,
         sequence: u32,
     },
+    /// Delete a single card from the quick panel context menu.
+    QuickDeleteCard(u32),
+    /// Open the inline editor for an existing card (prefilled with its content).
+    QuickStartEditCard(u32),
+    /// Open the inline editor for a brand-new card (empty).
+    QuickStartCreateCard,
+    /// The edit box text changed.
+    QuickEditCardInput(String),
+    /// Submit the edit box (Enter).
+    QuickEditCardSubmit,
+    /// Cancel the edit box (Esc).
+    QuickEditCardCancel,
+    /// Open the properties panel for a card.
+    QuickOpenProperties(u32),
+    /// Close the properties panel.
+    QuickCloseProperties,
+    /// Toggle auto_delete for a card.
+    QuickToggleAutoDelete(u32, bool),
+    /// Set the item-level hotkey code for a card.
+    QuickSetItemHotkey(u32, String),
+    /// Set pin_rank for a card (0=unpinned, 1=top, 2=bottom).
+    QuickSetPinRank(u32, u8),
+    /// Move a card to the top of the list.
+    QuickMoveToTop(u32),
+    /// Move a card to the bottom of the list.
+    QuickMoveToBottom(u32),
     QuickDismiss {
         restore: bool,
     },
@@ -431,6 +475,16 @@ pub enum Message {
     ToggleExpiry(bool),
     ExpiryDaysInput(String),
     ApplyExpiryDays,
+    /// Quick paste panel settings.
+    QuickToggleMoveTop(bool),
+    QuickLinesInput(String),
+    QuickApplyLines,
+    QuickSetPopupPos(crate::capture::QuickPopupPosition),
+    QuickToggleAlwaysOnTop(bool),
+    QuickToggleAutoDismiss(bool),
+    QuickOpacityInput(String),
+    QuickApplyOpacity,
+    QuickSetTitlePos(crate::capture::QuickTitlePosition),
     StartHotkeyRecord,
     CancelHotkeyRecord,
     RecordHotkeyKey(Key, Physical, Modifiers),
@@ -463,6 +517,8 @@ impl App {
         let state = shared.lock().map(|g| g.clone()).unwrap_or_default();
         let max_items_input = state.max_items.count.to_string();
         let expiry_days_input = state.expiry.days.to_string();
+        let quick_lines_input = state.quick_settings.display_lines.to_string();
+        let quick_opacity_input = (state.quick_settings.opacity * 100.0).round().to_string();
         crate::theme::set_palette(match state.theme_mode {
             ThemeMode::Dark => &crate::theme::DARK,
             ThemeMode::Light => &crate::theme::LIGHT,
@@ -494,11 +550,16 @@ impl App {
                 exclude_input: String::new(),
                 max_items_input,
                 expiry_days_input,
+                quick_lines_input,
+                quick_opacity_input,
                 limit_inputs_synced: false,
                 detail_menu_open: false,
                 card_menu: None,
                 quick_group_sel: None,
                 quick_group_input: None,
+                quick_edit: None,
+                quick_properties: None,
+                quick_edit_error: None,
                 cursor_position: iced::Point::ORIGIN,
                 window_size,
                 content_modal_for: None,
@@ -710,15 +771,24 @@ impl App {
                 | Message::OpenCardMenu(_)
                 | Message::QuickOpenCardMenu(_)
                 | Message::QuickGroupInputChanged(_)
+                | Message::QuickEditCardInput(_)
                 | Message::QuickHoverExpand
                 | Message::QuickHoverFold
         ) {
             self.card_menu = None;
         }
-        // While the inline group-name input is active, intercept the keyboard
-        // shortcuts that quick_event emits so Enter submits, Escape cancels,
-        // and arrow navigation is suppressed until editing finishes.
-        let message = if self.quick_group_input.is_some() {
+        // While the inline edit box is active, intercept the keyboard shortcuts
+        // that quick_event emits so Enter submits, Escape cancels, and arrow
+        // navigation is suppressed until editing finishes.  The same applies to
+        // the group-name input.
+        let message = if self.quick_edit.is_some() {
+            match message {
+                Message::RecopySelected => Message::QuickEditCardSubmit,
+                Message::QuickDismiss { restore: true } => Message::QuickEditCardCancel,
+                Message::QuickMove(_) | Message::QuickPasteNth(_) => Message::QuickEditCardCancel,
+                other => other,
+            }
+        } else if self.quick_group_input.is_some() {
             match message {
                 Message::RecopySelected => Message::QuickGroupInputSubmit,
                 // Escape only closes the name box; losing focus still dismisses the picker.
@@ -761,33 +831,9 @@ impl App {
                 Task::none()
             }
             Message::QuickStripPress => self.quick_strip_press(),
-            Message::QuickToggleFold => {
-                let folded = self.quick.as_ref().is_some_and(|quick| quick.strip_folded());
-                // Manual fold toggle always clears the hover-expanded flag so
-                // that the panel stays in whichever state the user chose.
-                if let Some(quick) = &mut self.quick {
-                    quick.strip.hover_expanded = false;
-                }
-                self.set_quick_folded(!folded)
-            }
-            Message::QuickHoverExpand => {
-                let Some(quick) = &mut self.quick else { return Task::none(); };
-                if quick.strip.folded {
-                    quick.strip.hover_expanded = true;
-                    self.set_quick_folded(false)
-                } else {
-                    Task::none()
-                }
-            }
-            Message::QuickHoverFold => {
-                let Some(quick) = &mut self.quick else { return Task::none(); };
-                if quick.strip.hover_expanded {
-                    quick.strip.hover_expanded = false;
-                    self.set_quick_folded(true)
-                } else {
-                    Task::none()
-                }
-            }
+            Message::QuickToggleFold => self.quick_toggle_fold(),
+            Message::QuickHoverExpand => self.quick_hover_expand(),
+            Message::QuickHoverFold => self.quick_hover_fold(),
             Message::QuickUnfocused => self.quick_unfocused(),
             Message::QuickSelectGroup(group_id) => {
                 self.quick_group_sel = group_id;
@@ -897,6 +943,141 @@ impl App {
                     sequences,
                 });
                 self.card_menu = None;
+                Task::none()
+            }
+            Message::QuickDeleteCard(sequence) => {
+                let sequences = self
+                    .state
+                    .cards
+                    .iter()
+                    .find(|card| card.sequence == sequence)
+                    .map(|card| card.raw_sequences.clone())
+                    .unwrap_or_else(|| vec![sequence]);
+                let _ = self
+                    .worker
+                    .cmd_tx
+                    .send(WorkerCmd::DeleteRecord { sequences });
+                self.card_menu = None;
+                self.quick_properties = None;
+                Task::none()
+            }
+            Message::QuickStartEditCard(sequence) => {
+                let card = self.state.cards.iter().find(|card| card.sequence == sequence);
+                let editable = card.is_some_and(quick::card_text_is_editable);
+                let value = card
+                    .map(|card| card.content_excerpt.clone())
+                    .unwrap_or_default();
+                self.card_menu = None;
+                if !editable {
+                    self.set_quick_error(Some(
+                        "内容过长，无法在快捷面板中完整编辑，请在管理窗口中处理".into(),
+                    ));
+                    return Task::none();
+                }
+                self.quick_edit = Some(QuickEditState {
+                    sequence: Some(sequence),
+                    value,
+                });
+                self.quick_edit_error = None;
+                Task::batch([
+                    text_input::focus(quick_edit_input_id()),
+                    text_input::select_all(quick_edit_input_id()),
+                ])
+            }
+            Message::QuickStartCreateCard => {
+                self.card_menu = None;
+                self.quick_edit = Some(QuickEditState {
+                    sequence: None,
+                    value: String::new(),
+                });
+                self.quick_edit_error = None;
+                text_input::focus(quick_edit_input_id())
+            }
+            Message::QuickEditCardInput(value) => {
+                if let Some(edit) = &mut self.quick_edit {
+                    edit.value = value;
+                }
+                Task::none()
+            }
+            Message::QuickEditCardSubmit => {
+                if let Some(edit) = self.quick_edit.take() {
+                    let text = edit.value.trim().to_string();
+                    if text.is_empty() {
+                        self.quick_edit_error = Some("内容不能为空".into());
+                        self.quick_edit = Some(edit);
+                        return text_input::focus(quick_edit_input_id());
+                    }
+                    if let Some(seq) = edit.sequence {
+                        let _ = self.worker.cmd_tx.send(WorkerCmd::UpdateRecordText {
+                            sequence: seq,
+                            text: text.clone(),
+                        });
+                    } else {
+                        let _ = self.worker.cmd_tx.send(WorkerCmd::CreateTextRecord {
+                            text,
+                            created_at_ms: crate::format::now_ms(),
+                        });
+                    }
+                }
+                self.quick_edit_error = None;
+                Task::none()
+            }
+            Message::QuickEditCardCancel => {
+                self.quick_edit = None;
+                self.quick_edit_error = None;
+                Task::none()
+            }
+            Message::QuickOpenProperties(sequence) => {
+                self.card_menu = None;
+                self.quick_properties = Some(sequence);
+                Task::none()
+            }
+            Message::QuickCloseProperties => {
+                self.quick_properties = None;
+                Task::none()
+            }
+            Message::QuickToggleAutoDelete(sequence, enabled) => {
+                let _ = self
+                    .worker
+                    .cmd_tx
+                    .send(WorkerCmd::SetAutoDelete { sequence, enabled });
+                Task::none()
+            }
+            Message::QuickSetItemHotkey(sequence, code) => {
+                // Conflict check: disallow setting the same hotkey as the global activation key.
+                if !code.is_empty() && code != "disabled" {
+                    if let Some(parsed) = Hotkey::parse(&code) {
+                        if parsed == self.state.hotkey_selected {
+                            self.set_quick_error(Some("该快捷键已被全局激活键占用".into()));
+                            return Task::none();
+                        }
+                    }
+                }
+                let _ = self
+                    .worker
+                    .cmd_tx
+                    .send(WorkerCmd::SetItemHotkey { sequence, code });
+                Task::none()
+            }
+            Message::QuickSetPinRank(sequence, rank) => {
+                let _ = self
+                    .worker
+                    .cmd_tx
+                    .send(WorkerCmd::SetPinRank { sequence, rank });
+                Task::none()
+            }
+            Message::QuickMoveToTop(sequence) => {
+                let _ = self.worker.cmd_tx.send(WorkerCmd::MoveToTop {
+                    sequence,
+                    at_ms: crate::format::now_ms(),
+                });
+                Task::none()
+            }
+            Message::QuickMoveToBottom(sequence) => {
+                let _ = self
+                    .worker
+                    .cmd_tx
+                    .send(WorkerCmd::MoveToBottom { sequence });
                 Task::none()
             }
             Message::QuickFinished { request_id, result } => {
@@ -1017,6 +1198,9 @@ impl App {
                         self.limit_inputs_synced = true;
                         self.max_items_input = next.max_items.count.to_string();
                         self.expiry_days_input = next.expiry.days.to_string();
+                        self.quick_lines_input = next.quick_settings.display_lines.to_string();
+                        self.quick_opacity_input =
+                            (next.quick_settings.opacity * 100.0).round().to_string();
                     }
                     self.state = next;
                 }
@@ -1212,6 +1396,104 @@ impl App {
                         self.expiry_days_input = self.state.expiry.days.to_string();
                     }
                 }
+                Task::none()
+            }
+            Message::QuickToggleMoveTop(on) => {
+                let mut cfg = self.state.quick_settings;
+                cfg.move_to_top_after_paste = on;
+                self.state.quick_settings = cfg;
+                let _ = self.worker.cmd_tx.send(WorkerCmd::SetQuickSettings(cfg));
+                Task::none()
+            }
+            Message::QuickLinesInput(value) => {
+                self.quick_lines_input = digits_only(&value, 2);
+                Task::none()
+            }
+            Message::QuickApplyLines => {
+                match QuickSettings::parse_display_lines(&self.quick_lines_input) {
+                    Some(lines) => {
+                        let mut cfg = self.state.quick_settings;
+                        cfg.display_lines = lines;
+                        self.quick_lines_input = lines.to_string();
+                        self.state.quick_settings = cfg;
+                        let _ = self.worker.cmd_tx.send(WorkerCmd::SetQuickSettings(cfg));
+                    }
+                    None => {
+                        self.state.status_note = format!(
+                            "显示行数需为 {}–{} 之间的整数",
+                            QuickSettings::MIN_DISPLAY_LINES,
+                            QuickSettings::MAX_DISPLAY_LINES
+                        );
+                        self.quick_lines_input =
+                            self.state.quick_settings.display_lines.to_string();
+                    }
+                }
+                Task::none()
+            }
+            Message::QuickSetPopupPos(position) => {
+                let mut cfg = self.state.quick_settings;
+                cfg.popup_position = position;
+                self.state.quick_settings = cfg;
+                let _ = self.worker.cmd_tx.send(WorkerCmd::SetQuickSettings(cfg));
+                Task::none()
+            }
+            Message::QuickToggleAlwaysOnTop(on) => {
+                let mut cfg = self.state.quick_settings;
+                cfg.always_on_top = on;
+                self.state.quick_settings = cfg;
+                // A live picker window follows the new level immediately.
+                let level = if on {
+                    iced::window::Level::AlwaysOnTop
+                } else {
+                    iced::window::Level::Normal
+                };
+                let _ = self.worker.cmd_tx.send(WorkerCmd::SetQuickSettings(cfg));
+                if self.quick.is_some() {
+                    quick::set_window_level(level)
+                } else {
+                    Task::none()
+                }
+            }
+            Message::QuickToggleAutoDismiss(on) => {
+                let mut cfg = self.state.quick_settings;
+                cfg.auto_dismiss = on;
+                self.state.quick_settings = cfg;
+                let _ = self.worker.cmd_tx.send(WorkerCmd::SetQuickSettings(cfg));
+                Task::none()
+            }
+            Message::QuickOpacityInput(value) => {
+                self.quick_opacity_input = digits_only(&value, 3);
+                Task::none()
+            }
+            Message::QuickApplyOpacity => {
+                match QuickSettings::parse_opacity(&self.quick_opacity_input) {
+                    Some(opacity) => {
+                        let mut cfg = self.state.quick_settings;
+                        cfg.opacity = opacity;
+                        self.quick_opacity_input = (opacity * 100.0).round().to_string();
+                        self.state.quick_settings = cfg;
+                        let _ = self.worker.cmd_tx.send(WorkerCmd::SetQuickSettings(cfg));
+                        // A live picker window follows the new opacity immediately.
+                        if self.quick.is_some() {
+                            quick::apply_quick_opacity(opacity);
+                        }
+                    }
+                    None => {
+                        self.state.status_note = format!(
+                            "不透明度需为 {}–100 之间的整数（百分比）",
+                            (QuickSettings::MIN_OPACITY * 100.0).round()
+                        );
+                        self.quick_opacity_input =
+                            (self.state.quick_settings.opacity * 100.0).round().to_string();
+                    }
+                }
+                Task::none()
+            }
+            Message::QuickSetTitlePos(position) => {
+                let mut cfg = self.state.quick_settings;
+                cfg.title_position = position;
+                self.state.quick_settings = cfg;
+                let _ = self.worker.cmd_tx.send(WorkerCmd::SetQuickSettings(cfg));
                 Task::none()
             }
             Message::ToggleTracking => {
@@ -2335,6 +2617,10 @@ fn compact_preview(content: &str, max_cells: usize) -> String {
 
 fn search_input_id() -> text_input::Id {
     text_input::Id::new("veya-search")
+}
+
+fn quick_edit_input_id() -> text_input::Id {
+    text_input::Id::new("quick-edit-card")
 }
 
 #[cfg(test)]

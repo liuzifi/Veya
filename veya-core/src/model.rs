@@ -91,6 +91,14 @@ pub struct ClipboardRecord {
     pub created_at_ms: i64,
     /// Retention state of this raw clipboard event, independent of its payload.
     pub pinned: bool,
+    /// Pin position: 0 = unpinned, 1 = pinned to top, 2 = pinned to bottom.
+    /// When `pinned` is true, `pin_rank` determines where the item appears
+    /// relative to other pinned items.
+    pub pin_rank: u8,
+    /// Per-item global hotkey stored as a Hotkey code string (or empty for none).
+    pub item_hotkey: String,
+    /// Whether this record should be auto-deleted after its next paste.
+    pub auto_delete: bool,
     pub pastes: Vec<PasteTriggerRecord>,
 }
 

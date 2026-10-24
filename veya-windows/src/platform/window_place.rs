@@ -1,13 +1,17 @@
 //! Place a logical-size window in the cursor monitor's physical work area.
 
-use windows::core::{s, w, HRESULT};
-use windows::Win32::Foundation::POINT;
+use windows::core::{s, w, HRESULT, PCWSTR};
+use windows::Win32::Foundation::{COLORREF, HWND, POINT};
 use windows::Win32::Graphics::Gdi::{
-    GetDC, GetDeviceCaps, GetMonitorInfoW, MonitorFromPoint, ReleaseDC, HMONITOR, LOGPIXELSX,
-    MONITORINFO, MONITOR_DEFAULTTONEAREST,
+    ClientToScreen, GetDC, GetDeviceCaps, GetMonitorInfoW, MonitorFromPoint, ReleaseDC, HMONITOR,
+    LOGPIXELSX, MONITORINFO, MONITOR_DEFAULTTONEAREST,
 };
 use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
-use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+use windows::Win32::UI::WindowsAndMessaging::{
+    FindWindowExW, GetCursorPos, GetForegroundWindow, GetGUIThreadInfo,
+    GetWindowLongPtrW, GetWindowThreadProcessId, SetLayeredWindowAttributes, SetWindowLongPtrW,
+    GWL_EXSTYLE, GUITHREADINFO, LWA_ALPHA, WS_EX_LAYERED,
+};
 
 type GetDpiForMonitorFn = unsafe extern "system" fn(HMONITOR, i32, *mut u32, *mut u32) -> HRESULT;
 
@@ -95,6 +99,139 @@ pub fn physical_to_window_logical(position: (f32, f32), current_scale: f32) -> (
     (position.0 / scale, position.1 / scale)
 }
 
+/// Anchor a window's top-left corner at a physical point, clamped into the
+/// point's monitor work area so the panel never spills off-screen.
+pub fn anchor_placement(
+    anchor_physical: (f32, f32),
+    window_width: f32,
+    window_height: f32,
+) -> Option<StartupPlacement> {
+    unsafe {
+        let point = POINT {
+            x: anchor_physical.0 as i32,
+            y: anchor_physical.1 as i32,
+        };
+        let monitor = MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST);
+        let mut info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        if !GetMonitorInfoW(monitor, &mut info).as_bool() {
+            return None;
+        }
+        let dpi_x = monitor_dpi(monitor);
+        let scale = if dpi_x == 0 { 1.0 } else { dpi_x as f32 / 96.0 };
+        let work = info.rcWork;
+        Some(fit_and_anchor(
+            (work.left, work.top, work.right, work.bottom),
+            (window_width, window_height),
+            scale,
+            anchor_physical,
+        ))
+    }
+}
+
+fn fit_and_anchor(
+    work: (i32, i32, i32, i32),
+    size: (f32, f32),
+    scale: f32,
+    anchor: (f32, f32),
+) -> StartupPlacement {
+    let (left, top, right, bottom) = work;
+    let available_width = ((right - left) as f32 / scale).max(1.0);
+    let available_height = ((bottom - top) as f32 / scale).max(1.0);
+    let logical_size = (size.0.min(available_width), size.1.min(available_height));
+    let phys_w = logical_size.0 * scale;
+    let phys_h = logical_size.1 * scale;
+    let x = anchor.0.clamp(left as f32, (right as f32 - phys_w).max(left as f32));
+    let y = anchor.1.clamp(top as f32, (bottom as f32 - phys_h).max(top as f32));
+    StartupPlacement {
+        logical_size,
+        physical_position: (x, y),
+    }
+}
+
+/// Anchor the panel's top-left corner at the current cursor position.
+pub fn cursor_anchor_placement(window_width: f32, window_height: f32) -> Option<StartupPlacement> {
+    unsafe {
+        let mut cursor = POINT::default();
+        GetCursorPos(&mut cursor).ok()?;
+        anchor_placement(
+            (cursor.x as f32, cursor.y as f32),
+            window_width,
+            window_height,
+        )
+    }
+}
+
+/// Bottom-right corner of the caret (text insertion point) in the
+/// foreground application, in physical screen coordinates.
+///
+/// Queries the foreground window's thread GUI state so the panel can open
+/// right next to where the user is typing. Returns `None` when there is no
+/// caret (desktop focus, terminals without caret reporting, ...).
+pub fn caret_physical_position() -> Option<(f32, f32)> {
+    unsafe {
+        let foreground = GetForegroundWindow();
+        let tid = GetWindowThreadProcessId(foreground, None);
+        if tid == 0 {
+            return None;
+        }
+        let mut gti = GUITHREADINFO {
+            cbSize: std::mem::size_of::<GUITHREADINFO>() as u32,
+            ..Default::default()
+        };
+        if GetGUIThreadInfo(tid, &mut gti).is_err() {
+            return None;
+        }
+        if gti.hwndCaret.is_invalid() {
+            return None;
+        }
+        // rcCaret is in the caret window's client coordinates; its bottom-right
+        // corner is where the next typed character will appear.
+        let mut point = POINT {
+            x: gti.rcCaret.right,
+            y: gti.rcCaret.bottom,
+        };
+        if !ClientToScreen(gti.hwndCaret, &mut point).as_bool() {
+            return None;
+        }
+        Some((point.x as f32, point.y as f32))
+    }
+}
+
+/// The single shared Veya window (manager and quick picker reuse one window).
+fn find_app_window() -> Option<HWND> {
+    unsafe { FindWindowExW(None, None, PCWSTR::null(), w!("Veya")).ok() }
+}
+
+/// Give the window per-pixel alpha via `WS_EX_LAYERED`. `opacity` is 0.0
+/// (invisible) to 1.0 (opaque). Returns whether it was applied.
+pub fn set_window_opacity(opacity: f32) -> bool {
+    let Some(hwnd) = find_app_window() else {
+        return false;
+    };
+    let alpha = (opacity.clamp(0.0, 1.0) * 255.0).round() as u8;
+    unsafe {
+        let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) | WS_EX_LAYERED.0 as isize;
+        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style);
+        // The colour key is ignored with LWA_ALPHA.
+        SetLayeredWindowAttributes(hwnd, COLORREF(0), alpha, LWA_ALPHA).is_ok()
+    }
+}
+
+/// Remove the layered style again so the window renders fully opaque.
+pub fn clear_window_opacity() -> bool {
+    let Some(hwnd) = find_app_window() else {
+        return false;
+    };
+    unsafe {
+        let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & !(WS_EX_LAYERED.0 as isize);
+        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style);
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::{fit_and_center, physical_to_window_logical};
@@ -123,5 +260,15 @@ mod tests {
         let placement = fit_and_center((0, 40, 1920, 1000), (1080.0, 700.0), 1.5);
         assert_eq!(placement.logical_size, (1080.0, 640.0));
         assert_eq!(placement.physical_position, (150.0, 40.0));
+    }
+
+    #[test]
+    fn anchored_window_clamps_into_work_area() {
+        let placement = fit_and_anchor((0, 0, 1920, 1040), (440.0, 724.0), 1.0, (1900.0, 1000.0));
+        assert_eq!(placement.logical_size, (440.0, 724.0));
+        assert_eq!(placement.physical_position, (1480.0, 316.0));
+        // Anchor far left of a negative-origin monitor stays inside.
+        let placement = fit_and_anchor((-2560, 0, 0, 1400), (440.0, 724.0), 1.0, (-2600.0, -10.0));
+        assert_eq!(placement.physical_position, (-2560.0, 0.0));
     }
 }

@@ -309,6 +309,283 @@ impl App {
         .width(Length::Fill)
         .style(theme::panel_style);
 
+        // Quick paste panel behavior and appearance.
+        let quick = self.state.quick_settings;
+        let flag_chip = |current: bool, want: bool, message: Message| {
+            button(text(if want { "开启" } else { "关闭" }).size(12))
+                .on_press(message)
+                .style(theme::chip_button(current == want))
+                .padding(pad(6.0, 12.0, 6.0, 12.0))
+        };
+        let pos_chip = |current: crate::capture::QuickPopupPosition,
+                        want: crate::capture::QuickPopupPosition| {
+            button(text(want.label()).size(12))
+                .on_press(Message::QuickSetPopupPos(want))
+                .style(theme::chip_button(current == want))
+                .padding(pad(6.0, 12.0, 6.0, 12.0))
+        };
+        let title_chip = |current: crate::capture::QuickTitlePosition,
+                          want: crate::capture::QuickTitlePosition| {
+            button(text(want.label()).size(12))
+                .on_press(Message::QuickSetTitlePos(want))
+                .style(theme::chip_button(current == want))
+                .padding(pad(6.0, 12.0, 6.0, 12.0))
+        };
+
+        let move_top_row = row![
+            icons::icon(Icon::Pin, theme::ACCENT(), 18.0),
+            column![
+                body("粘贴后移到顶部")
+                    .size(13)
+                    .font(crate::font::name_font()),
+                meta("复制或粘贴后，把该记录移动到历史列表最上方")
+                    .size(11)
+                    .color(theme::MUTED()),
+            ]
+            .spacing(2)
+            .width(Length::Fill),
+            row![
+                flag_chip(
+                    quick.move_to_top_after_paste,
+                    true,
+                    Message::QuickToggleMoveTop(true)
+                ),
+                flag_chip(
+                    quick.move_to_top_after_paste,
+                    false,
+                    Message::QuickToggleMoveTop(false)
+                ),
+            ]
+            .spacing(6),
+        ]
+        .spacing(12)
+        .align_y(Alignment::Center);
+
+        let lines_changed = self.quick_lines_input != quick.display_lines.to_string();
+        let lines_row = row![
+            icons::icon(Icon::History, theme::ACCENT(), 18.0),
+            column![
+                body("每条记录显示行数")
+                    .size(13)
+                    .font(crate::font::name_font()),
+                meta("面板内每条记录最多显示的文本行数（1–10 行）")
+                    .size(11)
+                    .color(theme::MUTED()),
+            ]
+            .spacing(2)
+            .width(Length::Fill),
+            text_input("1", &self.quick_lines_input)
+                .on_input(Message::QuickLinesInput)
+                .on_submit(Message::QuickApplyLines)
+                .padding(pad(6.0, 10.0, 6.0, 10.0))
+                .size(12)
+                .style(theme::field_style)
+                .width(Length::Fixed(84.0)),
+            text("行").size(12).color(theme::MUTED()),
+            button(text("应用").size(12))
+                .on_press_maybe(lines_changed.then_some(Message::QuickApplyLines))
+                .style(if lines_changed {
+                    theme::primary_button
+                } else {
+                    theme::action_button
+                })
+                .padding(pad(6.0, 12.0, 6.0, 12.0)),
+        ]
+        .spacing(12)
+        .align_y(Alignment::Center);
+
+        let popup_pos_row = row![
+            icons::icon(Icon::Search, theme::ACCENT(), 18.0),
+            column![
+                body("弹出位置")
+                    .size(13)
+                    .font(crate::font::name_font()),
+                meta("快捷面板出现的位置")
+                    .size(11)
+                    .color(theme::MUTED()),
+            ]
+            .spacing(2)
+            .width(Length::Fill),
+            row![
+                pos_chip(
+                    quick.popup_position,
+                    crate::capture::QuickPopupPosition::InsertSymbol
+                ),
+                pos_chip(
+                    quick.popup_position,
+                    crate::capture::QuickPopupPosition::Cursor
+                ),
+                pos_chip(
+                    quick.popup_position,
+                    crate::capture::QuickPopupPosition::LastPosition
+                ),
+            ]
+            .spacing(6),
+        ]
+        .spacing(12)
+        .align_y(Alignment::Center);
+
+        let on_top_row = row![
+            icons::icon(Icon::Pin, theme::ACCENT(), 18.0),
+            column![
+                body("面板窗口置顶")
+                    .size(13)
+                    .font(crate::font::name_font()),
+                meta("快捷面板显示时始终保持在其他窗口之上")
+                    .size(11)
+                    .color(theme::MUTED()),
+            ]
+            .spacing(2)
+            .width(Length::Fill),
+            row![
+                flag_chip(
+                    quick.always_on_top,
+                    true,
+                    Message::QuickToggleAlwaysOnTop(true)
+                ),
+                flag_chip(
+                    quick.always_on_top,
+                    false,
+                    Message::QuickToggleAlwaysOnTop(false)
+                ),
+            ]
+            .spacing(6),
+        ]
+        .spacing(12)
+        .align_y(Alignment::Center);
+
+        let auto_dismiss_row = row![
+            icons::icon(Icon::Close, theme::ACCENT(), 18.0),
+            column![
+                body("失焦自动关闭")
+                    .size(13)
+                    .font(crate::font::name_font()),
+                meta("焦点离开面板时自动收起；关闭后需按 Esc 手动退出")
+                    .size(11)
+                    .color(theme::MUTED()),
+            ]
+            .spacing(2)
+            .width(Length::Fill),
+            row![
+                flag_chip(
+                    quick.auto_dismiss,
+                    true,
+                    Message::QuickToggleAutoDismiss(true)
+                ),
+                flag_chip(
+                    quick.auto_dismiss,
+                    false,
+                    Message::QuickToggleAutoDismiss(false)
+                ),
+            ]
+            .spacing(6),
+        ]
+        .spacing(12)
+        .align_y(Alignment::Center);
+
+        let opacity_changed =
+            self.quick_opacity_input != (quick.opacity * 100.0).round().to_string();
+        let opacity_row = row![
+            icons::icon(Icon::External, theme::ACCENT(), 18.0),
+            column![
+                body("面板不透明度")
+                    .size(13)
+                    .font(crate::font::name_font()),
+                meta("快捷面板的显示不透明度（10–100 的百分比）")
+                    .size(11)
+                    .color(theme::MUTED()),
+            ]
+            .spacing(2)
+            .width(Length::Fill),
+            text_input("100", &self.quick_opacity_input)
+                .on_input(Message::QuickOpacityInput)
+                .on_submit(Message::QuickApplyOpacity)
+                .padding(pad(6.0, 10.0, 6.0, 10.0))
+                .size(12)
+                .style(theme::field_style)
+                .width(Length::Fixed(84.0)),
+            text("%").size(12).color(theme::MUTED()),
+            button(text("应用").size(12))
+                .on_press_maybe(opacity_changed.then_some(Message::QuickApplyOpacity))
+                .style(if opacity_changed {
+                    theme::primary_button
+                } else {
+                    theme::action_button
+                })
+                .padding(pad(6.0, 12.0, 6.0, 12.0)),
+        ]
+        .spacing(12)
+        .align_y(Alignment::Center);
+
+        let title_pos_row = row![
+            icons::icon(Icon::Search, theme::ACCENT(), 18.0),
+            column![
+                body("标题栏位置")
+                    .size(13)
+                    .font(crate::font::name_font()),
+                meta("面板标题条所在的一侧，决定折叠方向")
+                    .size(11)
+                    .color(theme::MUTED()),
+            ]
+            .spacing(2)
+            .width(Length::Fill),
+            row![
+                title_chip(
+                    quick.title_position,
+                    crate::capture::QuickTitlePosition::Top
+                ),
+                title_chip(
+                    quick.title_position,
+                    crate::capture::QuickTitlePosition::Bottom
+                ),
+                title_chip(
+                    quick.title_position,
+                    crate::capture::QuickTitlePosition::Left
+                ),
+                title_chip(
+                    quick.title_position,
+                    crate::capture::QuickTitlePosition::Right
+                ),
+            ]
+            .spacing(6),
+        ]
+        .spacing(12)
+        .align_y(Alignment::Center);
+
+        let group_quick = container(
+            column![
+                move_top_row,
+                Space::with_height(12.0),
+                theme::hdivider(),
+                Space::with_height(12.0),
+                lines_row,
+                Space::with_height(12.0),
+                theme::hdivider(),
+                Space::with_height(12.0),
+                popup_pos_row,
+                Space::with_height(12.0),
+                theme::hdivider(),
+                Space::with_height(12.0),
+                on_top_row,
+                Space::with_height(12.0),
+                theme::hdivider(),
+                Space::with_height(12.0),
+                auto_dismiss_row,
+                Space::with_height(12.0),
+                theme::hdivider(),
+                Space::with_height(12.0),
+                opacity_row,
+                Space::with_height(12.0),
+                theme::hdivider(),
+                Space::with_height(12.0),
+                title_pos_row,
+            ]
+            .spacing(0),
+        )
+        .padding(18)
+        .width(Length::Fill)
+        .style(theme::panel_style);
+
         // Group 2: Data & Danger Zone
         let data_stats_row = row![
             icons::icon(Icon::External, theme::ACCENT(), 18.0),
@@ -477,6 +754,10 @@ impl App {
             section_label("窗口与快捷键"),
             Space::with_height(8.0),
             hotkey_group,
+            Space::with_height(20.0),
+            section_label("快捷粘贴面板"),
+            Space::with_height(8.0),
+            group_quick,
             Space::with_height(20.0),
             section_label("数据管理与危险操作"),
             Space::with_height(8.0),

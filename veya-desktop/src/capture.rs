@@ -92,6 +92,9 @@ pub struct CardView {
     pub payload: CardPayloadView,
     pub kind: ContentKind,
     pub pinned: bool,
+    pub pin_rank: u8,
+    pub item_hotkey: String,
+    pub auto_delete: bool,
     pub source_app: String,
     pub source_confidence: SourceConfidence,
     pub source_window: String,
@@ -253,6 +256,173 @@ impl ExpiryConfig {
     }
 }
 
+// ── Quick paste panel settings ──────────────────────────────────────────────
+
+/// Where the quick paste panel should appear when triggered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum QuickPopupPosition {
+    /// Near the text insertion caret of the target window.
+    InsertSymbol,
+    /// At the mouse cursor position.
+    Cursor,
+    /// At the position the panel was last shown at.
+    #[default]
+    LastPosition,
+}
+
+impl QuickPopupPosition {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::InsertSymbol => "插入符号处",
+            Self::Cursor => "光标处",
+            Self::LastPosition => "上次弹出位置",
+        }
+    }
+
+    pub fn as_key(self) -> &'static str {
+        match self {
+            Self::InsertSymbol => "insert_symbol",
+            Self::Cursor => "cursor",
+            Self::LastPosition => "last_position",
+        }
+    }
+
+    pub fn from_key(s: &str) -> Self {
+        match s {
+            "insert_symbol" => Self::InsertSymbol,
+            "cursor" => Self::Cursor,
+            _ => Self::LastPosition,
+        }
+    }
+}
+
+/// Title bar position on the quick paste panel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum QuickTitlePosition {
+    #[default]
+    Top,
+    Bottom,
+    Left,
+    Right,
+}
+
+impl QuickTitlePosition {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Top => "顶部",
+            Self::Bottom => "底部",
+            Self::Left => "左侧",
+            Self::Right => "右侧",
+        }
+    }
+
+    pub fn as_key(self) -> &'static str {
+        match self {
+            Self::Top => "top",
+            Self::Bottom => "bottom",
+            Self::Left => "left",
+            Self::Right => "right",
+        }
+    }
+
+    pub fn from_key(s: &str) -> Self {
+        match s {
+            "bottom" => Self::Bottom,
+            "left" => Self::Left,
+            "right" => Self::Right,
+            _ => Self::Top,
+        }
+    }
+}
+
+/// All settings for the quick paste panel, persisted via `quick_*` keys.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct QuickSettings {
+    /// Move the pasted item to the top of the list after a paste.
+    pub move_to_top_after_paste: bool,
+    /// Number of lines to display per clipboard item (default 1).
+    pub display_lines: u32,
+    /// Where the panel pops up.
+    pub popup_position: QuickPopupPosition,
+    /// Always-on-top window level (bound to Ctrl+Space toggle).
+    pub always_on_top: bool,
+    /// Auto-dismiss the panel when it loses focus.
+    pub auto_dismiss: bool,
+    /// Panel opacity: 1.0 = fully opaque, 0.0 = fully transparent.
+    pub opacity: f32,
+    /// Title bar position.
+    pub title_position: QuickTitlePosition,
+}
+
+impl Default for QuickSettings {
+    fn default() -> Self {
+        Self {
+            move_to_top_after_paste: false,
+            display_lines: 1,
+            popup_position: QuickPopupPosition::default(),
+            always_on_top: true,
+            auto_dismiss: true,
+            opacity: 1.0,
+            title_position: QuickTitlePosition::default(),
+        }
+    }
+}
+
+impl QuickSettings {
+    pub const MIN_DISPLAY_LINES: u32 = 1;
+    pub const MAX_DISPLAY_LINES: u32 = 10;
+    pub const MIN_OPACITY: f32 = 0.1;
+    pub const MAX_OPACITY: f32 = 1.0;
+
+    /// Parse a user-entered line count. Only a plain integer in the allowed range is valid.
+    pub fn parse_display_lines(input: &str) -> Option<u32> {
+        let value = input.trim().parse::<u32>().ok()?;
+        (Self::MIN_DISPLAY_LINES..=Self::MAX_DISPLAY_LINES)
+            .contains(&value)
+            .then_some(value)
+    }
+
+    /// Parse a user-entered opacity percentage (0–100). Returns 0.1–1.0.
+    pub fn parse_opacity(input: &str) -> Option<f32> {
+        let value = input.trim().parse::<u32>().ok()?;
+        if value == 0 {
+            return None; // 0% is not allowed — would be invisible
+        }
+        let clamped = value.min(100) as f32 / 100.0;
+        Some(clamped.max(Self::MIN_OPACITY))
+    }
+
+    /// Rebuild the setting from its stored values; anything missing falls back to defaults.
+    pub fn from_settings(
+        move_to_top: Option<&str>,
+        display_lines: Option<&str>,
+        popup_position: Option<&str>,
+        always_on_top: Option<&str>,
+        auto_dismiss: Option<&str>,
+        opacity: Option<&str>,
+        title_position: Option<&str>,
+    ) -> Self {
+        Self {
+            move_to_top_after_paste: move_to_top == Some("1"),
+            display_lines: display_lines
+                .and_then(Self::parse_display_lines)
+                .unwrap_or(1),
+            popup_position: popup_position
+                .map(QuickPopupPosition::from_key)
+                .unwrap_or_default(),
+            always_on_top: always_on_top.map(|s| s != "0").unwrap_or(true),
+            auto_dismiss: auto_dismiss.map(|s| s != "0").unwrap_or(true),
+            opacity: opacity
+                .and_then(|s| s.parse::<f32>().ok())
+                .map(|v| v.clamp(Self::MIN_OPACITY, Self::MAX_OPACITY))
+                .unwrap_or(1.0),
+            title_position: title_position
+                .map(QuickTitlePosition::from_key)
+                .unwrap_or_default(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct UiState {
     /// Advances only when the worker publishes a changed snapshot.
@@ -282,6 +452,8 @@ pub struct UiState {
     pub theme_mode: ThemeMode,
     pub max_items: MaxItemsConfig,
     pub expiry: ExpiryConfig,
+    /// Quick paste panel settings.
+    pub quick_settings: QuickSettings,
     /// Card groups for the quick-panel tab bar.
     pub groups: Vec<GroupSummary>,
 }
@@ -347,6 +519,9 @@ pub fn card_view_from_summary(
         payload,
         kind,
         pinned: c.pinned,
+        pin_rank: c.pin_rank,
+        item_hotkey: c.item_hotkey.clone(),
+        auto_delete: c.auto_delete,
         source_app: c.source_app.clone(),
         source_confidence: c.source_confidence,
         source_window: c.source_window.clone(),
@@ -478,6 +653,9 @@ mod tests {
                 source_confidence: SourceConfidence::Likely,
                 created_at_ms: 1,
                 pinned: false,
+                pin_rank: 0,
+                item_hotkey: String::new(),
+                auto_delete: false,
                 pastes: Vec::new(),
             },
             raw_sequences: vec![1],

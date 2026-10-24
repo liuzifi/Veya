@@ -17,10 +17,12 @@ Source modifications are in `src/program.rs` and `src/conversion.rs`:
    now reads `SPI_GETWHEELSCROLLLINES` (the system "scroll N lines per notch"
    setting) and applies it to the line delta. winit 0.30 sends a raw
    `LineDelta(0.0, ±1.0)` per notch without consulting this setting; iced's
-   scrollable then multiplies by `WHEEL_PX_PER_LINE = 120.0`, so one notch
-   always scrolled 120 px regardless of user preference. When the system is
-   set to `WHEEL_PAGESCROLL` ("scroll one screen at a time"), the delta is
-   converted to pixels so iced scrolls a full page. The `Cargo.toml` now
+   scrollable then moves 60 px per unit of a line delta (the Windows default
+   of 3 lines at about 20 px), so one notch always scrolled 60 px regardless
+   of user preference. The setting now scales that by `lines / 3`, so the
+   default is unchanged. When the system is set to `WHEEL_PAGESCROLL`
+   ("scroll one screen at a time"), the delta is converted to pixels so iced
+   scrolls a full page. The `Cargo.toml` now
    enables the `winuser` feature on `winapi` and relaxes `unsafe_code` to
    `allow` (needed for `SystemParametersInfoW`).
 

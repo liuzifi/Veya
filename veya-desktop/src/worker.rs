@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use veya_core::{
     payload_hash, ClipboardPayload, ClipboardRecord, FlowEngine, InternalClipboardWrite,
-    PasteConfidence, PasteTrigger, PasteTriggerRecord,
+    PasteConfidence, PasteTrigger, PasteTriggerRecord, SourceConfidence,
 };
 use veya_storage::Store;
 use veya_windows::hotkey::Hotkey;
@@ -14,8 +14,8 @@ use veya_windows::platform::{enrich_clipboard, enrich_paste, PlatformEvent, Wind
 use veya_windows::{write_payload, ClipboardWriteError};
 
 use crate::capture::{
-    CardPayloadView, CardView, ExpiryConfig, GroupSummary, HistoryQuery, MaxItemsConfig, SharedUi,
-    ThemeMode, UiState,
+    CardPayloadView, CardView, ExpiryConfig, GroupSummary, HistoryQuery, MaxItemsConfig,
+    QuickSettings, SharedUi, ThemeMode, UiState,
 };
 use crate::format::now_ms;
 
@@ -49,10 +49,25 @@ pub enum WorkerCmd {
     UnexcludeApp { exe: String },
     DeleteRecord { sequences: Vec<u32> },
     SetPinned { sequences: Vec<u32>, pinned: bool },
+    /// Update the text content of an existing text record.
+    UpdateRecordText { sequence: u32, text: String },
+    /// Insert a new text record into the database and flow engine.
+    CreateTextRecord { text: String, created_at_ms: i64 },
+    /// Set pin_rank for a record: 0 = unpinned, 1 = top, 2 = bottom.
+    SetPinRank { sequence: u32, rank: u8 },
+    /// Set the per-item global hotkey code string (empty = clear).
+    SetItemHotkey { sequence: u32, code: String },
+    /// Toggle the auto-delete flag for a record.
+    SetAutoDelete { sequence: u32, enabled: bool },
+    /// Move a record to the top of history (touch with current timestamp).
+    MoveToTop { sequence: u32, at_ms: i64 },
+    /// Move a record to the bottom of history.
+    MoveToBottom { sequence: u32 },
     /// Replace the whole database with a backup file (after an automatic safety copy).
     RestoreDatabase { path: PathBuf },
     SetExpandedRaw(bool),
     SetHotkey(Hotkey),
+    SetQuickSettings(crate::capture::QuickSettings),
     QueryHistory(HistoryQuery),
     SetHistoryActive(bool),
     LoadFullImage(u32),
@@ -131,6 +146,37 @@ fn load_limits(store: &Store) -> (MaxItemsConfig, ExpiryConfig) {
             setting("retention").as_deref(),
         ),
     )
+}
+
+/// Load quick paste panel settings from the store; missing keys fall back to defaults.
+fn load_quick_settings(store: &Store) -> QuickSettings {
+    use crate::capture::QuickSettings;
+    let setting = |key: &str| store.get_setting(key).ok().flatten();
+    QuickSettings::from_settings(
+        setting("quick_move_to_top").as_deref(),
+        setting("quick_display_lines").as_deref(),
+        setting("quick_popup_position").as_deref(),
+        setting("quick_always_on_top").as_deref(),
+        setting("quick_auto_dismiss").as_deref(),
+        setting("quick_opacity").as_deref(),
+        setting("quick_title_position").as_deref(),
+    )
+}
+
+/// Delete a record that is marked "auto delete" once it has been pasted.
+fn delete_after_paste(
+    store: &mut Store,
+    flow: &mut FlowEngine,
+    sequence: u32,
+) -> Result<bool, String> {
+    if !flow.record(sequence).is_some_and(|record| record.auto_delete) {
+        return Ok(false);
+    }
+    store
+        .delete_records(&[sequence])
+        .map_err(|error| format!("粘贴后自动删除失败：{error}"))?;
+    flow.delete_record(sequence);
+    Ok(true)
 }
 
 /// Delete all but the newest `keep` safety copies. The timestamp in the name sorts
@@ -552,6 +598,7 @@ fn publish(
     theme_mode: ThemeMode,
     max_items: MaxItemsConfig,
     expiry: ExpiryConfig,
+    quick_settings: QuickSettings,
     groups: Vec<GroupSummary>,
 ) {
     history_page.refresh(store, history_query, history_active);
@@ -584,6 +631,7 @@ fn publish(
         theme_mode,
         max_items,
         expiry,
+        quick_settings,
         groups,
     };
     if let Ok(mut guard) = shared.lock() {
@@ -701,6 +749,7 @@ fn run_worker(
         let mut last_purge_ms = 0i64;
         let mut theme_mode = load_theme_mode(&store);
         let (mut max_items, mut expiry) = load_limits(&store);
+        let mut quick_settings = load_quick_settings(&store);
 
         publish(
             &shared,
@@ -721,6 +770,7 @@ fn run_worker(
             theme_mode,
             max_items,
             expiry,
+            quick_settings,
             store.list_groups().unwrap_or_default(),
         );
 
@@ -745,7 +795,13 @@ fn run_worker(
                             sequence,
                             write_payload,
                         ) {
-                            Ok(_) => "已复制到剪贴板".into(),
+                            Ok(_) => {
+                                if quick_settings.move_to_top_after_paste {
+                                    let _ = store.touch_record(sequence, now_ms());
+                                    history_page.invalidate();
+                                }
+                                "已复制到剪贴板".into()
+                            }
                             Err(error) => format!("复制失败：{error}"),
                         };
                     }
@@ -756,7 +812,13 @@ fn run_worker(
                         let result =
                             prepare_record_paste(&mut flow, &store, sequence, write_payload);
                         status_note = match &result {
-                            Ok(_) => "已准备粘贴".into(),
+                            Ok(_) => {
+                                if quick_settings.move_to_top_after_paste {
+                                    let _ = store.touch_record(sequence, now_ms());
+                                    history_page.invalidate();
+                                }
+                                "已准备粘贴".into()
+                            }
                             Err(error) => format!("粘贴准备失败：{error}"),
                         };
                         let _ = event_tx.send(WorkerEvent::PastePrepared { request_id, result });
@@ -880,6 +942,143 @@ fn run_worker(
                             Err(error) => format!("固定状态保存失败：{error}"),
                         };
                     }
+                    WorkerCmd::UpdateRecordText { sequence, text } => {
+                        status_note = match store.update_record_text(sequence, &text) {
+                            Ok(changed) => {
+                                if changed > 0 {
+                                    history_page.invalidate();
+                                    if let Some(record) = flow.record(sequence) {
+                                        let mut updated = record.clone();
+                                        updated.content = text.clone();
+                                        updated.payload = ClipboardPayload::Text(text);
+                                        updated.content_hash = payload_hash(&updated.payload);
+                                        flow.replace_record(updated);
+                                    }
+                                    "内容已更新".into()
+                                } else {
+                                    "无法编辑此记录（仅支持文本）".into()
+                                }
+                            }
+                            Err(error) => format!("编辑失败：{error}"),
+                        };
+                    }
+                    WorkerCmd::CreateTextRecord { text, created_at_ms } => {
+                        status_note = match store.next_sequence() {
+                            Ok(sequence) => {
+                                let payload = ClipboardPayload::Text(text.clone());
+                                let rec = ClipboardRecord {
+                                    sequence,
+                                    content_type: "text".into(),
+                                    content: text.clone(),
+                                    content_hash: payload_hash(&payload),
+                                    payload,
+                                    source_app: String::new(),
+                                    source_pid: 0,
+                                    source_window: String::new(),
+                                    source_confidence: SourceConfidence::Exact,
+                                    created_at_ms,
+                                    pinned: false,
+                                    pin_rank: 0,
+                                    item_hotkey: String::new(),
+                                    auto_delete: false,
+                                    pastes: Vec::new(),
+                                };
+                                match store.insert_record(&rec) {
+                                    Ok(()) => {
+                                        flow.insert_record(rec);
+                                        history_page.invalidate();
+                                        "新记录已创建".into()
+                                    }
+                                    Err(error) => format!("创建失败：{error}"),
+                                }
+                            }
+                            Err(error) => format!("创建失败：{error}"),
+                        };
+                    }
+                    WorkerCmd::SetPinRank { sequence, rank } => {
+                        status_note = match store.set_pin_rank(sequence, rank) {
+                            Ok(changed) => {
+                                if changed > 0 {
+                                    history_page.invalidate();
+                                }
+                                if let Some(record) = flow.record(sequence) {
+                                    let mut updated = record.clone();
+                                    updated.pin_rank = rank;
+                                    updated.pinned = rank != 0;
+                                    flow.replace_record(updated);
+                                }
+                                match rank {
+                                    0 => "已移除固定位置".into(),
+                                    1 => "已固定到顶部".into(),
+                                    2 => "已固定到底部".into(),
+                                    _ => "固定状态已更新".into(),
+                                }
+                            }
+                            Err(error) => format!("固定位置保存失败：{error}"),
+                        };
+                    }
+                    WorkerCmd::SetItemHotkey { sequence, code } => {
+                        status_note = match store.set_item_hotkey(sequence, &code) {
+                            Ok(changed) => {
+                                if changed > 0 {
+                                    history_page.invalidate();
+                                }
+                                if let Some(record) = flow.record(sequence) {
+                                    let mut updated = record.clone();
+                                    updated.item_hotkey = code.clone();
+                                    flow.replace_record(updated);
+                                }
+                                if code.is_empty() {
+                                    "已清除条目快捷键".into()
+                                } else {
+                                    "条目快捷键已设置".into()
+                                }
+                            }
+                            Err(error) => format!("快捷键保存失败：{error}"),
+                        };
+                    }
+                    WorkerCmd::SetAutoDelete { sequence, enabled } => {
+                        status_note = match store.set_auto_delete(sequence, enabled) {
+                            Ok(changed) => {
+                                if changed > 0 {
+                                    history_page.invalidate();
+                                }
+                                if let Some(record) = flow.record(sequence) {
+                                    let mut updated = record.clone();
+                                    updated.auto_delete = enabled;
+                                    flow.replace_record(updated);
+                                }
+                                if enabled {
+                                    "已开启自动删除".into()
+                                } else {
+                                    "已关闭自动删除".into()
+                                }
+                            }
+                            Err(error) => format!("自动删除设置失败：{error}"),
+                        };
+                    }
+                    WorkerCmd::MoveToTop { sequence, at_ms } => {
+                        status_note = match store.touch_record(sequence, at_ms) {
+                            Ok(changed) => {
+                                if changed > 0 {
+                                    history_page.invalidate();
+                                }
+                                "已移到顶部".into()
+                            }
+                            Err(error) => format!("移动失败：{error}"),
+                        };
+                    }
+                    WorkerCmd::MoveToBottom { sequence } => {
+                        status_note = match store.move_to_bottom(sequence) {
+                            Ok(changed) => {
+                                if changed > 0 {
+                                    history_page.invalidate();
+                                }
+                                "已移到底部".into()
+                            }
+                            Err(error) => format!("移动失败：{error}"),
+                        };
+                    }
                     WorkerCmd::SetExpandedRaw(on) => {
                         expanded_raw = on;
                     }
@@ -919,6 +1118,37 @@ fn run_worker(
                             veya_windows::platform::request_hotkey_recording(false);
                         }
                     }
+                    WorkerCmd::SetQuickSettings(settings) => {
+                        quick_settings = settings;
+                        let _ = store.set_setting(
+                            "quick_move_to_top",
+                            if settings.move_to_top_after_paste { "1" } else { "0" },
+                        );
+                        let _ = store.set_setting(
+                            "quick_display_lines",
+                            &settings.display_lines.to_string(),
+                        );
+                        let _ = store.set_setting(
+                            "quick_popup_position",
+                            settings.popup_position.as_key(),
+                        );
+                        let _ = store.set_setting(
+                            "quick_always_on_top",
+                            if settings.always_on_top { "1" } else { "0" },
+                        );
+                        let _ = store.set_setting(
+                            "quick_auto_dismiss",
+                            if settings.auto_dismiss { "1" } else { "0" },
+                        );
+                        let _ = store.set_setting(
+                            "quick_opacity",
+                            &settings.opacity.to_string(),
+                        );
+                        let _ = store.set_setting(
+                            "quick_title_position",
+                            settings.title_position.as_key(),
+                        );
+                    }
                     WorkerCmd::RestoreDatabase { path } => {
                         let result = restore_database(
                             &mut store,
@@ -938,6 +1168,7 @@ fn run_worker(
                                 excluded_apps = store.list_excluded().unwrap_or_default();
                                 theme_mode = load_theme_mode(&store);
                                 (max_items, expiry) = load_limits(&store);
+                                quick_settings = load_quick_settings(&store);
                                 status_note = format!("已还原 {} 条记录", report.records);
                             }
                             Err(error) => status_note = format!("还原失败：{error}"),
@@ -1103,6 +1334,7 @@ fn run_worker(
                     theme_mode,
                     max_items,
                     expiry,
+                    quick_settings,
                     store.list_groups().unwrap_or_default(),
                 );
             }
@@ -1186,8 +1418,19 @@ fn run_worker(
                         }
                         PlatformEvent::PasteTrigger(raw) if tracking => {
                             let trigger = enrich_paste(raw);
+                            let pasted = flow.current_sequence();
                             match persist_paste_trigger(&mut store, &mut flow, trigger) {
-                                Ok(true) => history_page.invalidate(),
+                                Ok(true) => {
+                                    history_page.invalidate();
+                                    // "自动删除": the record goes once it has been pasted.
+                                    if let Some(sequence) = pasted {
+                                        match delete_after_paste(&mut store, &mut flow, sequence) {
+                                            Ok(true) => status_note = "已按设置在粘贴后删除该记录".into(),
+                                            Ok(false) => {}
+                                            Err(error) => status_note = error,
+                                        }
+                                    }
+                                }
                                 Ok(false) => {}
                                 Err(error) => status_note = error,
                             }
@@ -1220,6 +1463,7 @@ fn run_worker(
                     theme_mode,
                     max_items,
                     expiry,
+                    quick_settings,
                     store.list_groups().unwrap_or_default(),
                 );
             }
@@ -1377,6 +1621,9 @@ mod tests {
             source_confidence: SourceConfidence::Exact,
             created_at_ms,
             pinned: false,
+            pin_rank: 0,
+            item_hotkey: String::new(),
+            auto_delete: false,
             pastes: Vec::new(),
         }
     }
@@ -2018,6 +2265,30 @@ mod tests {
         assert!(names.contains(&"my-own-backup.db".to_string()));
         assert!(names.iter().all(|n| !n.contains("20261001") && !n.contains("20261003")));
         assert!(names.iter().any(|n| n.contains("20261008")));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn auto_delete_removes_only_records_marked_for_it_once_pasted() {
+        let dir = restore_dir("auto-delete");
+        let mut store = Store::open(dir.join("veya.db")).unwrap();
+        let mut flow = FlowEngine::default();
+        let mut keep = text_record(1, "keep", 10);
+        let mut gone = text_record(2, "gone", 20);
+        gone.auto_delete = true;
+        keep.auto_delete = false;
+        for record in [keep, gone] {
+            store.insert_record(&record).unwrap();
+            flow.insert_record(record);
+        }
+
+        assert_eq!(delete_after_paste(&mut store, &mut flow, 1), Ok(false));
+        assert!(store.load_record(1).unwrap().is_some());
+        assert_eq!(delete_after_paste(&mut store, &mut flow, 2), Ok(true));
+        assert!(store.load_record(2).unwrap().is_none());
+        assert!(flow.record(2).is_none());
+        assert_eq!(delete_after_paste(&mut store, &mut flow, 99), Ok(false));
+        drop(store);
         let _ = std::fs::remove_dir_all(dir);
     }
 }

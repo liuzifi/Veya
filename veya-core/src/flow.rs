@@ -145,6 +145,9 @@ impl FlowEngine {
             source_confidence: ev.source_confidence,
             created_at_ms: ev.timestamp_ms,
             pinned: false,
+            pin_rank: 0,
+            item_hotkey: String::new(),
+            auto_delete: false,
             pastes: Vec::new(),
         };
         self.records.insert(ev.sequence, record);
@@ -203,8 +206,11 @@ impl FlowEngine {
         let mut changed = 0;
         for sequence in sequences {
             if let Some(record) = self.records.get_mut(sequence) {
-                if record.pinned != pinned {
+                // Same rule as the stored rows: unpinning also clears the pin position.
+                let rank = if pinned { record.pin_rank } else { 0 };
+                if record.pinned != pinned || record.pin_rank != rank {
                     record.pinned = pinned;
+                    record.pin_rank = rank;
                     changed += 1;
                 }
             }
@@ -235,6 +241,23 @@ impl FlowEngine {
             }
         }
         removed
+    }
+
+    /// Replace an existing record in-place (keeps order position).  If the
+    /// record doesn't exist yet, this is a no-op.
+    pub fn replace_record(&mut self, record: ClipboardRecord) {
+        if self.records.contains_key(&record.sequence) {
+            self.records.insert(record.sequence, record);
+        }
+    }
+
+    /// Insert a brand-new record: adds to order and records map.
+    pub fn insert_record(&mut self, record: ClipboardRecord) {
+        let seq = record.sequence;
+        if !self.records.contains_key(&seq) {
+            self.order.push(seq);
+        }
+        self.records.insert(seq, record);
     }
 
     pub fn clear(&mut self) {

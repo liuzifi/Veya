@@ -428,7 +428,6 @@ pub fn card_button(selected: bool) -> impl Fn(&Theme, button::Status) -> button:
 pub fn card_button_quick(
     selected: bool,
     alt: bool,
-    used: bool,
 ) -> impl Fn(&Theme, button::Status) -> button::Style + 'static {
     move |_t: &Theme, status: button::Status| {
         let p = palette();
@@ -457,24 +456,15 @@ pub fn card_button_quick(
                     1.0,
                 ),
                 _ => {
-                    // Non-hovered, non-selected: apply alternating tint.
+                    // Non-hovered, non-selected: apply alternating tint. White on a near-white
+                    // window is invisible, so the light palette shades with its inset grey.
                     if alt {
-                        (
-                            Color::from_rgba(
-                                p.surface.r,
-                                p.surface.g,
-                                p.surface.b,
-                                0.45,
-                            ),
-                            Color::from_rgba(
-                                p.surface.r,
-                                p.surface.g,
-                                p.surface.b,
-                                0.20,
-                            ),
-                            Color::TRANSPARENT,
-                            0.0,
-                        )
+                        let tint = if p.light {
+                            Color { a: 0.85, ..p.chip_bg }
+                        } else {
+                            Color { a: 0.45, ..p.surface }
+                        };
+                        (tint, tint, Color::TRANSPARENT, 0.0)
                     } else {
                         (
                             Color::TRANSPARENT,
@@ -485,13 +475,6 @@ pub fn card_button_quick(
                     }
                 }
             }
-        };
-
-        // If the item was already pasted, draw a red left border.
-        let (border_c, border_w) = if used && !selected {
-            (p.danger, 3.0)
-        } else {
-            (border_c, border_w)
         };
 
         button::Style {
@@ -506,6 +489,15 @@ pub fn card_button_quick(
             border: stroke(border_c, border_w, 10.0),
             ..Default::default()
         }
+    }
+}
+
+/// Narrow red bar at the left edge of a quick-paste row that has already been pasted.
+pub fn used_marker_style(_t: &Theme) -> container::Style {
+    container::Style {
+        background: Some(bg(DANGER())),
+        border: stroke(Color::TRANSPARENT, 0.0, 2.0),
+        ..Default::default()
     }
 }
 

@@ -6,8 +6,8 @@ use std::{collections::HashMap, fmt::Write as _, path::Path};
 
 use rusqlite::{params, types::Type, Connection, DatabaseName, OptionalExtension};
 use veya_core::{
-    ClipboardPayload, ClipboardRecord, HistoryPayload, HistoryRecord, PasteMethod,
-    PasteTriggerRecord, SourceConfidence,
+    payload_hash, ClipboardPayload, ClipboardRecord, HistoryPayload, HistoryRecord,
+    PasteMethod, PasteTriggerRecord, SourceConfidence,
 };
 
 /// Lightweight projection used by the UI to render the group tab bar.
@@ -47,6 +47,9 @@ pub struct BackupInfo {
     pub groups: usize,
     pub size_bytes: u64,
 }
+
+/// First sequence number handed out to records created inside Veya.
+pub const CREATED_SEQUENCE_BASE: u32 = 0x8000_0000;
 
 pub struct Store {
     conn: Connection,
@@ -160,6 +163,19 @@ impl Store {
                 ))?;
             }
         }
+        // Pin position (0=unpinned, 1=pinned to top, 2=pinned to bottom),
+        // per-item global hotkey string, and auto-delete flag.
+        for (name, declaration) in [
+            ("pin_rank", "INTEGER NOT NULL DEFAULT 0"),
+            ("item_hotkey", "TEXT NOT NULL DEFAULT ''"),
+            ("auto_delete", "INTEGER NOT NULL DEFAULT 0"),
+        ] {
+            if !has_column(&tx, "clipboard_record", name)? {
+                tx.execute_batch(&format!(
+                    "ALTER TABLE clipboard_record ADD COLUMN {name} {declaration}"
+                ))?;
+            }
+        }
         tx.commit()
     }
 
@@ -198,8 +214,9 @@ impl Store {
             INSERT INTO clipboard_record (
                 sequence, content_type, content, content_hash,
                 source_app, source_pid, source_window, source_confidence, created_at_ms, pinned,
-                payload, image_width, image_height
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                payload, image_width, image_height,
+                pin_rank, item_hotkey, auto_delete
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
             ON CONFLICT(sequence) DO UPDATE SET
                 content_type=excluded.content_type,
                 content=excluded.content,
@@ -212,7 +229,10 @@ impl Store {
                 pinned=excluded.pinned,
                 payload=excluded.payload,
                 image_width=excluded.image_width,
-                image_height=excluded.image_height
+                image_height=excluded.image_height,
+                pin_rank=excluded.pin_rank,
+                item_hotkey=excluded.item_hotkey,
+                auto_delete=excluded.auto_delete
             "#,
             params![
                 rec.sequence as i64,
@@ -228,6 +248,9 @@ impl Store {
                 blob,
                 width,
                 height,
+                rec.pin_rank as i64,
+                rec.item_hotkey,
+                rec.auto_delete as i64,
             ],
         )?;
         tx.execute(
@@ -316,16 +339,16 @@ impl Store {
         let direction = if newest_first { "DESC" } else { "ASC" };
         let comparison = if newest_first { "<" } else { ">" };
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let (filter, order) = (page_filter(comparison), page_order(direction));
         let sql = format!(
             r#"
             SELECT sequence, content_type, content, content_hash,
                    source_app, source_pid, source_window, source_confidence, created_at_ms, pinned,
-                   payload, image_width, image_height
+                   payload, image_width, image_height,
+                   pin_rank, item_hotkey, auto_delete
             FROM clipboard_record
-            WHERE (?1 IS NULL
-                   OR created_at_ms {comparison} ?1
-                   OR (created_at_ms = ?1 AND sequence {comparison} ?2))
-            ORDER BY created_at_ms {direction}, sequence {direction}
+            WHERE {filter}
+            ORDER BY {order}
             LIMIT ?3
             "#,
         );
@@ -363,16 +386,17 @@ impl Store {
         }
         let direction = if newest_first { "DESC" } else { "ASC" };
         let comparison = if newest_first { "<" } else { ">" };
+        let (filter, order) = (page_filter(comparison), page_order(direction));
         let sql = format!(
             r#"
             SELECT sequence, content_type, content, content_hash,
                    source_app, source_pid, source_window, source_confidence, created_at_ms, pinned,
                    CASE WHEN content_type = 'files' THEN payload ELSE NULL END,
-                   image_width, image_height, length(payload)
+                   image_width, image_height, length(payload),
+                   pin_rank, item_hotkey, auto_delete
             FROM clipboard_record
-            WHERE (?1 IS NULL OR created_at_ms {comparison} ?1
-                   OR (created_at_ms = ?1 AND sequence {comparison} ?2))
-            ORDER BY created_at_ms {direction}, sequence {direction} LIMIT ?3
+            WHERE {filter}
+            ORDER BY {order} LIMIT ?3
         "#
         );
         let mut stmt = self.conn.prepare(&sql)?;
@@ -403,7 +427,8 @@ impl Store {
                 SELECT sequence, content_type, content, content_hash,
                        source_app, source_pid, source_window, source_confidence, created_at_ms, pinned,
                        CASE WHEN content_type = 'files' THEN payload ELSE NULL END,
-                       image_width, image_height, length(payload)
+                       image_width, image_height, length(payload),
+                       pin_rank, item_hotkey, auto_delete
                 FROM clipboard_record WHERE sequence = ?1
                 "#,
                 params![i64::from(sequence)],
@@ -480,7 +505,8 @@ impl Store {
             r#"
             SELECT sequence, content_type, content, content_hash,
                    source_app, source_pid, source_window, source_confidence, created_at_ms, pinned,
-                   payload, image_width, image_height
+                   payload, image_width, image_height,
+                   pin_rank, item_hotkey, auto_delete
             FROM clipboard_record
             WHERE sequence = ?1
             "#,
@@ -501,7 +527,8 @@ impl Store {
             r#"
             SELECT sequence, content_type, content, content_hash,
                    source_app, source_pid, source_window, source_confidence, created_at_ms, pinned,
-                   payload, image_width, image_height
+                   payload, image_width, image_height,
+                   pin_rank, item_hotkey, auto_delete
             FROM clipboard_record
             ORDER BY created_at_ms ASC, sequence ASC
             "#,
@@ -527,6 +554,12 @@ impl Store {
                     source_confidence: parse_confidence(&row.get::<_, String>(7)?),
                     created_at_ms: row.get(8)?,
                     pinned: row.get::<_, i64>(9)? != 0,
+                    pin_rank: effective_pin_rank(
+                        row.get::<_, i64>(9)? != 0,
+                        row.get::<_, i64>(13).unwrap_or(0),
+                    ),
+                    item_hotkey: row.get::<_, String>(14).unwrap_or_default(),
+                    auto_delete: row.get::<_, i64>(15).unwrap_or(0) != 0,
                     pastes: Vec::new(),
                 })
             })?
@@ -650,12 +683,119 @@ impl Store {
         let tx = self.conn.transaction()?;
         let mut changed = 0;
         for sequence in sequences {
+            // Unpinning also clears the position, otherwise an unpinned row would keep
+            // sorting at the top or bottom.
             changed += tx.execute(
-                "UPDATE clipboard_record SET pinned = ?1 WHERE sequence = ?2 AND pinned != ?1",
+                "UPDATE clipboard_record SET pinned = ?1, \
+                 pin_rank = CASE WHEN ?1 = 0 THEN 0 ELSE pin_rank END \
+                 WHERE sequence = ?2 AND (pinned != ?1 OR (?1 = 0 AND pin_rank != 0))",
                 params![pinned as i64, *sequence as i64],
             )?;
         }
         tx.commit()?;
+        Ok(changed)
+    }
+
+    /// Refresh `created_at_ms` so the record floats to the top of history
+    /// lists ordered by recency. Returns rows changed (0 when missing).
+    pub fn touch_record(&mut self, sequence: u32, at_ms: i64) -> rusqlite::Result<usize> {
+        let changed = self.conn.execute(
+            "UPDATE clipboard_record SET created_at_ms = ?1 WHERE sequence = ?2",
+            params![at_ms, sequence as i64],
+        )?;
+        Ok(changed)
+    }
+
+    /// Update the text content of a text record. Recomputes content_hash from
+    /// the new payload so the row stays internally consistent.  Only makes sense
+    /// for `Text` payloads; returns Ok(0) for non-text records.
+    pub fn update_record_text(&mut self, sequence: u32, text: &str) -> rusqlite::Result<usize> {
+        let payload = ClipboardPayload::Text(text.to_string());
+        let content_hash = payload_hash(&payload);
+        let changed = self.conn.execute(
+            "UPDATE clipboard_record SET content = ?1, content_hash = ?2, payload = NULL, image_width = NULL, image_height = NULL WHERE sequence = ?3 AND content_type = 'text'",
+            params![text, content_hash, sequence as i64],
+        )?;
+        Ok(changed)
+    }
+
+    /// Set `pin_rank` and keep the legacy `pinned` boolean in sync.
+    /// rank: 0 = unpinned, 1 = pinned-to-top, 2 = pinned-to-bottom.
+    pub fn set_pin_rank(&mut self, sequence: u32, rank: u8) -> rusqlite::Result<usize> {
+        let pinned = rank != 0;
+        let changed = self.conn.execute(
+            "UPDATE clipboard_record SET pin_rank = ?1, pinned = ?2 WHERE sequence = ?3",
+            params![rank as i64, pinned as i64, sequence as i64],
+        )?;
+        Ok(changed)
+    }
+
+    /// Sequence for a record created inside Veya (not copied).
+    ///
+    /// Copied records are keyed by the Windows clipboard sequence number, which counts up
+    /// from zero at every boot. Created records count up from [`CREATED_SEQUENCE_BASE`], far
+    /// above anything the clipboard reaches, so a later copy can never take the same key and
+    /// overwrite the created text.
+    pub fn next_sequence(&self) -> rusqlite::Result<u32> {
+        let max: Option<i64> = self.conn.query_row(
+            "SELECT MAX(sequence) FROM clipboard_record WHERE sequence >= ?1",
+            params![i64::from(CREATED_SEQUENCE_BASE)],
+            |row| row.get(0),
+        )?;
+        Ok(max
+            .map(|value| (value as u32).saturating_add(1))
+            .unwrap_or(CREATED_SEQUENCE_BASE))
+    }
+
+    /// Store or clear the per-item global hotkey code string.
+    pub fn set_item_hotkey(&mut self, sequence: u32, code: &str) -> rusqlite::Result<usize> {
+        let changed = self.conn.execute(
+            "UPDATE clipboard_record SET item_hotkey = ?1 WHERE sequence = ?2",
+            params![code, sequence as i64],
+        )?;
+        Ok(changed)
+    }
+
+    /// Toggle the auto-delete flag for a record.
+    pub fn set_auto_delete(&mut self, sequence: u32, enabled: bool) -> rusqlite::Result<usize> {
+        let changed = self.conn.execute(
+            "UPDATE clipboard_record SET auto_delete = ?1 WHERE sequence = ?2",
+            params![enabled as i64, sequence as i64],
+        )?;
+        Ok(changed)
+    }
+
+    /// Return all (sequence, item_hotkey) pairs that have a non-empty hotkey.
+    pub fn load_all_item_hotkeys(&self) -> rusqlite::Result<Vec<(u32, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT sequence, item_hotkey FROM clipboard_record WHERE item_hotkey != '' ORDER BY sequence ASC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((r.get::<_, i64>(0)? as u32, r.get::<_, String>(1)?))
+        })?;
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row?);
+        }
+        Ok(result)
+    }
+
+    /// Push a record to the bottom of history by assigning it a timestamp
+    /// older than every other record's `created_at_ms`.
+    pub fn move_to_bottom(&mut self, sequence: u32) -> rusqlite::Result<usize> {
+        let min_ms: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT MIN(created_at_ms) FROM clipboard_record WHERE sequence != ?1",
+                params![sequence as i64],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let target_ms = min_ms.map(|m| m - 1).unwrap_or(0);
+        let changed = self.conn.execute(
+            "UPDATE clipboard_record SET created_at_ms = ?1 WHERE sequence = ?2",
+            params![target_ms, sequence as i64],
+        )?;
         Ok(changed)
     }
 
@@ -1009,6 +1149,12 @@ fn decode_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<ClipboardRecord> {
         source_confidence: parse_confidence(&row.get::<_, String>(7)?),
         created_at_ms: row.get(8)?,
         pinned: row.get::<_, i64>(9)? != 0,
+        pin_rank: effective_pin_rank(
+            row.get::<_, i64>(9)? != 0,
+            row.get::<_, i64>(13).unwrap_or(0),
+        ),
+        item_hotkey: row.get::<_, String>(14).unwrap_or_default(),
+        auto_delete: row.get::<_, i64>(15).unwrap_or(0) != 0,
         pastes: Vec::new(),
     })
 }
@@ -1064,8 +1210,55 @@ fn decode_history_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<HistoryRec
         source_confidence: parse_confidence(&row.get::<_, String>(7)?),
         created_at_ms: row.get(8)?,
         pinned: row.get::<_, i64>(9)? != 0,
+        pin_rank: effective_pin_rank(
+            row.get::<_, i64>(9)? != 0,
+            row.get::<_, i64>(14).unwrap_or(0),
+        ),
+        item_hotkey: row.get::<_, String>(15).unwrap_or_default(),
+        auto_delete: row.get::<_, i64>(16).unwrap_or(0) != 0,
         pastes: Vec::new(),
     })
+}
+
+/// Where a record sorts relative to pinned ones: pinned-to-top (0), everything else (1),
+/// pinned-to-bottom (2).
+///
+/// A plain pin (`pin_rank = 0`) keeps its place in time; only a position moves a row. A
+/// stale position left on a row that is no longer pinned is ignored.
+const RANK_GROUP: &str =
+    "CASE WHEN pinned = 0 THEN 1 WHEN pin_rank = 1 THEN 0 WHEN pin_rank = 2 THEN 2 ELSE 1 END";
+
+/// Rows read back into memory keep their stored position, except that an unpinned row has
+/// none (a stale value left from before it was unpinned).
+fn effective_pin_rank(pinned: bool, stored: i64) -> u8 {
+    if pinned {
+        stored.clamp(0, 2) as u8
+    } else {
+        0
+    }
+}
+
+/// Keyset condition for "the rows after the cursor `(?1 = created_at_ms, ?2 = sequence)`".
+///
+/// History is ordered by pin group first, then time, so the cursor row's own group decides
+/// where the next page starts: later groups are all still to come, the same group continues
+/// by time. Comparing by time alone would repeat pinned rows on every page and skip rows
+/// when a page ends inside a pinned group.
+fn page_filter(comparison: &str) -> String {
+    let cursor_group = format!(
+        "COALESCE((SELECT {RANK_GROUP} FROM clipboard_record WHERE sequence = ?2), 1)"
+    );
+    format!(
+        "(?1 IS NULL \
+         OR {RANK_GROUP} > {cursor_group} \
+         OR ({RANK_GROUP} = {cursor_group} \
+             AND (created_at_ms {comparison} ?1 \
+                  OR (created_at_ms = ?1 AND sequence {comparison} ?2))))"
+    )
+}
+
+fn page_order(direction: &str) -> String {
+    format!("{RANK_GROUP} ASC, created_at_ms {direction}, sequence {direction}")
 }
 
 fn has_column(conn: &Connection, table: &str, name: &str) -> rusqlite::Result<bool> {
@@ -1180,6 +1373,9 @@ mod tests {
             source_confidence: SourceConfidence::Exact,
             created_at_ms: 1_000 + i64::from(seq),
             pinned: false,
+            pin_rank: 0,
+            item_hotkey: String::new(),
+            auto_delete: false,
             pastes: vec![PasteTriggerRecord {
                 target_app: "notepad.exe".into(),
                 target_pid: 2,
@@ -2050,6 +2246,151 @@ mod tests {
         assert_eq!(record.content, "old");
         assert!(!record.pinned);
         store.create_group("新分组", 1).unwrap();
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn order_of(store: &Store, newest_first: bool) -> Vec<u32> {
+        store
+            .load_records_page(None, 100, newest_first)
+            .unwrap()
+            .iter()
+            .map(|record| record.sequence)
+            .collect()
+    }
+
+    #[test]
+    fn pinned_to_top_sorts_first_and_pinned_to_bottom_last() {
+        let dir = unique_temp_dir("rank-order");
+        let mut store = Store::open(dir.join("v.db")).unwrap();
+        for seq in 1..=5 {
+            store.insert_record(&rec(seq)).unwrap();
+        }
+        store.set_pin_rank(2, 1).unwrap();
+        store.set_pin_rank(4, 2).unwrap();
+        assert_eq!(order_of(&store, true), vec![2, 5, 3, 1, 4]);
+        assert_eq!(order_of(&store, false), vec![2, 1, 3, 5, 4]);
+        let history: Vec<u32> = store
+            .load_history_page(None, 100, true)
+            .unwrap()
+            .iter()
+            .map(|record| record.sequence)
+            .collect();
+        assert_eq!(history, vec![2, 5, 3, 1, 4]);
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn paging_through_pinned_rows_neither_repeats_nor_skips() {
+        let dir = unique_temp_dir("rank-paging");
+        let mut store = Store::open(dir.join("v.db")).unwrap();
+        for seq in 1..=9 {
+            store.insert_record(&rec(seq)).unwrap();
+        }
+        // An old pinned row, a newer pinned row, and two rows pinned to the bottom.
+        store.set_pin_rank(1, 1).unwrap();
+        store.set_pin_rank(8, 1).unwrap();
+        store.set_pin_rank(2, 2).unwrap();
+        store.set_pin_rank(9, 2).unwrap();
+
+        for newest_first in [true, false] {
+            let expected = order_of(&store, newest_first);
+            assert_eq!(expected.len(), 9);
+            for page_size in [1, 2, 3, 4] {
+                let mut seen = Vec::new();
+                let mut cursor = None;
+                loop {
+                    let page = store
+                        .load_records_page(cursor, page_size, newest_first)
+                        .unwrap();
+                    let Some(last) = page.last() else { break };
+                    cursor = Some((last.created_at_ms, last.sequence));
+                    seen.extend(page.iter().map(|record| record.sequence));
+                }
+                assert_eq!(seen, expected, "records, newest_first={newest_first}, page={page_size}");
+
+                let mut seen = Vec::new();
+                let mut cursor = None;
+                loop {
+                    let page = store
+                        .load_history_page(cursor, page_size, newest_first)
+                        .unwrap();
+                    let Some(last) = page.last() else { break };
+                    cursor = Some((last.created_at_ms, last.sequence));
+                    seen.extend(page.iter().map(|record| record.sequence));
+                }
+                assert_eq!(seen, expected, "history, newest_first={newest_first}, page={page_size}");
+            }
+        }
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn unpinning_clears_the_pin_position_and_a_plain_pin_keeps_its_place() {
+        let dir = unique_temp_dir("rank-sync");
+        let mut store = Store::open(dir.join("v.db")).unwrap();
+        for seq in 1..=3 {
+            store.insert_record(&rec(seq)).unwrap();
+        }
+        let load = |store: &Store, seq: u32| store.load_record(seq).unwrap().unwrap();
+        assert_eq!(store.set_pinned(&[2], true).unwrap(), 1);
+        assert_eq!((load(&store, 2).pinned, load(&store, 2).pin_rank), (true, 0));
+        assert_eq!(order_of(&store, true), vec![3, 2, 1], "a plain pin does not reorder");
+
+        store.set_pin_rank(2, 2).unwrap();
+        assert_eq!(order_of(&store, true), vec![3, 1, 2]);
+        assert_eq!(store.set_pinned(&[2], true).unwrap(), 0, "already pinned");
+        assert_eq!(load(&store, 2).pin_rank, 2);
+
+        assert_eq!(store.set_pinned(&[2], false).unwrap(), 1);
+        assert_eq!((load(&store, 2).pinned, load(&store, 2).pin_rank), (false, 0));
+        assert_eq!(order_of(&store, true), vec![3, 2, 1], "back in its place in time");
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_stale_pin_position_on_an_unpinned_row_is_ignored_without_rewriting_it() {
+        let dir = unique_temp_dir("rank-stale");
+        let path = dir.join("v.db");
+        {
+            let mut store = Store::open(&path).unwrap();
+            for seq in 1..=3 {
+                store.insert_record(&rec(seq)).unwrap();
+            }
+        }
+        // Row 3 was unpinned by an older build that left its position behind.
+        let conn = Connection::open(&path).unwrap();
+        conn.execute("UPDATE clipboard_record SET pinned = 0, pin_rank = 1 WHERE sequence = 3", [])
+            .unwrap();
+        conn.execute_batch(
+            "CREATE TRIGGER no_record_update BEFORE UPDATE ON clipboard_record \
+             BEGIN SELECT RAISE(ABORT, 'record rewritten'); END;",
+        )
+        .unwrap();
+        drop(conn);
+
+        let store = Store::open(&path).unwrap();
+        assert_eq!(order_of(&store, true), vec![3, 2, 1]);
+        let stale = store.load_record(3).unwrap().unwrap();
+        assert_eq!((stale.pinned, stale.pin_rank), (false, 0));
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn created_records_never_share_a_sequence_with_copied_ones() {
+        let dir = unique_temp_dir("created-seq");
+        let mut store = Store::open(dir.join("v.db")).unwrap();
+        assert_eq!(store.next_sequence().unwrap(), CREATED_SEQUENCE_BASE);
+        for seq in [5, 900, 70_000] {
+            store.insert_record(&rec(seq)).unwrap();
+        }
+        assert_eq!(store.next_sequence().unwrap(), CREATED_SEQUENCE_BASE);
+        store.insert_record(&rec(CREATED_SEQUENCE_BASE)).unwrap();
+        assert_eq!(store.next_sequence().unwrap(), CREATED_SEQUENCE_BASE + 1);
         drop(store);
         let _ = std::fs::remove_dir_all(dir);
     }

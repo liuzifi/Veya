@@ -38,6 +38,9 @@ pub struct HistoryRecord {
     pub source_confidence: SourceConfidence,
     pub created_at_ms: i64,
     pub pinned: bool,
+    pub pin_rank: u8,
+    pub item_hotkey: String,
+    pub auto_delete: bool,
     pub pastes: Vec<PasteTriggerRecord>,
 }
 
@@ -79,6 +82,7 @@ impl HistoryAggregator {
         let joins = self.current.as_ref().is_some_and(|group| {
             group.representative.content_hash == record.content_hash
                 && group.representative.pinned == record.pinned
+                && group.representative.pin_rank == record.pin_rank
                 && group.representative.source_app == record.source_app
                 && self.adjacent_created_at_ms.abs_diff(record.created_at_ms)
                     <= AGGREGATION_WINDOW_MS as u64
@@ -251,6 +255,9 @@ mod tests {
             },
             created_at_ms,
             pinned: false,
+            pin_rank: 0,
+            item_hotkey: String::new(),
+            auto_delete: false,
             pastes: vec![
                 PasteTriggerRecord {
                     target_app: format!("target {sequence}"),
@@ -292,6 +299,9 @@ mod tests {
             source_confidence: record.source_confidence,
             created_at_ms: record.created_at_ms,
             pinned: record.pinned,
+            pin_rank: record.pin_rank,
+            item_hotkey: record.item_hotkey.clone(),
+            auto_delete: record.auto_delete,
             pastes: record.pastes.clone(),
         }
     }
