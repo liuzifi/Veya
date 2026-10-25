@@ -84,6 +84,12 @@ jobs:
           echo "version=$ver" >> "$GITHUB_OUTPUT"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
+      - name: Stamp installer filename with version
+        shell: bash
+        run: |
+          mv "artifacts/veya-setup.exe" "artifacts/veya-setup-${{ steps.version.outputs.version }}.exe"
+          ls -la artifacts/
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -91,7 +97,7 @@ jobs:
           body: |
             ## Veya ${{ steps.version.outputs.version }}
 
-            Download the installer below (`veya-setup.exe`) and run it to install Veya.
+            Download the installer below (`veya-setup-${{ steps.version.outputs.version }}.exe`) and run it to install Veya.
 
             This is a Windows 7 SP1 compatible build (static CRT, x86_64-win7-windows-msvc).
 
@@ -100,4 +106,4 @@ jobs:
           draft: false
           prerelease: false
           files: |
-            artifacts/veya-setup.exe
+            artifacts/veya-setup-${{ steps.version.outputs.version }}.exe
