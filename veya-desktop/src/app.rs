@@ -357,6 +357,8 @@ pub enum Message {
     QuickHoverExpand,
     /// Mouse left the panel while hover-expanded — auto-fold.
     QuickHoverFold,
+    /// Enable/disable the "auto-expand on hover" setting.
+    QuickSetHoverExpand(bool),
     QuickUnfocused,
     QuickDeleteGroup(i64),
     QuickOpenCardMenu(u32),
@@ -842,6 +844,13 @@ impl App {
             Message::QuickToggleFold => self.quick_toggle_fold(),
             Message::QuickHoverExpand => self.quick_hover_expand(),
             Message::QuickHoverFold => self.quick_hover_fold(),
+            Message::QuickSetHoverExpand(enabled) => {
+                let mut cfg = self.state.quick_settings;
+                cfg.hover_expand_enabled = enabled;
+                self.state.quick_settings = cfg;
+                let _ = self.worker.cmd_tx.send(WorkerCmd::SetQuickSettings(cfg));
+                Task::none()
+            }
             Message::QuickUnfocused => self.quick_unfocused(),
             Message::QuickSelectGroup(group_id) => {
                 self.quick_group_sel = group_id;

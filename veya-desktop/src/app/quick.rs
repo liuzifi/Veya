@@ -181,6 +181,13 @@ impl App {
         self.unload_content();
         self.unload_full_image();
         if self.quick.is_none() {
+            // Seed the unfold size so a hover-expand before the native window reports its
+            // full size still restores a usable panel instead of staying at strip width.
+            let mut strip = Strip::default();
+            if strip.expanded_size.width <= 0.0 {
+                strip.expanded_size =
+                    iced::Size::new(QUICK_WIDTH, self.quick_window_height());
+            }
             self.quick = Some(QuickPanel {
                 target,
                 saved: ManagementState {
@@ -195,7 +202,7 @@ impl App {
                 pending: None,
                 sending: false,
                 error: self.last_paste_error.take(),
-                strip: Strip::default(),
+                strip,
                 ctrl_down: false,
             });
         } else if let Some(quick) = &mut self.quick {
@@ -677,8 +684,14 @@ impl App {
                     window_size.width > STRIP_WIDTH + 1.0
                 }
             };
-            if measured || quick.strip.expanded_size.width <= 0.0 {
+            if measured {
                 quick.strip.expanded_size = window_size;
+            } else if quick.strip.expanded_size.width <= 0.0 {
+                // The window has not reported the full size yet (or carries a stale strip
+                // size); fall back to the nominal size so unfolding still restores a usable
+                // panel instead of leaving the window at strip width.
+                quick.strip.expanded_size =
+                    iced::Size::new(QUICK_WIDTH, self.quick_window_height());
             }
             let window_size = quick.strip.expanded_size;
             // Resizing keeps the top-left corner; sides whose strip sits on the
@@ -706,6 +719,13 @@ impl App {
                 Task::batch([set_window_level(iced::window::Level::AlwaysOnTop), fold])
             }
         } else {
+            // Unfolding needs a real expanded size. If it was never captured (panel opened
+            // already folded, or the fold resize raced the hover), fall back to the nominal
+            // size so the panel actually shows its content instead of staying at strip width.
+            if quick.strip.expanded_size.width <= 0.0 {
+                quick.strip.expanded_size =
+                    iced::Size::new(QUICK_WIDTH, self.quick_window_height());
+            }
             let size = quick.strip.expanded_size;
             let unfold = match title_position {
                 QuickTitlePosition::Bottom => {
@@ -736,6 +756,9 @@ impl App {
 
     /// The pointer reached the strip of a folded panel: open it to show the entries.
     pub(super) fn quick_hover_expand(&mut self) -> Task<Message> {
+        if !self.state.quick_settings.hover_expand_enabled {
+            return Task::none();
+        }
         let Some(quick) = &mut self.quick else {
             return Task::none();
         };

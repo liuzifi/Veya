@@ -396,6 +396,8 @@ pub struct QuickSettings {
     pub font_size: u32,
     /// Body font family for quick panel rows.
     pub font_family: QuickFontFamily,
+    /// Auto-expand a folded panel when the pointer enters the title strip.
+    pub hover_expand_enabled: bool,
 }
 
 impl Default for QuickSettings {
@@ -410,6 +412,7 @@ impl Default for QuickSettings {
             title_position: QuickTitlePosition::default(),
             font_size: Self::DEFAULT_FONT_SIZE,
             font_family: QuickFontFamily::default(),
+            hover_expand_enabled: true,
         }
     }
 }
@@ -460,6 +463,7 @@ impl QuickSettings {
         title_position: Option<&str>,
         font_size: Option<&str>,
         font_family: Option<&str>,
+        hover_expand_enabled: Option<&str>,
     ) -> Self {
         Self {
             move_to_top_after_paste: move_to_top == Some("1"),
@@ -484,6 +488,7 @@ impl QuickSettings {
             font_family: font_family
                 .map(QuickFontFamily::from_key)
                 .unwrap_or_default(),
+            hover_expand_enabled: hover_expand_enabled.map(|s| s != "0").unwrap_or(true),
         }
     }
 }

@@ -214,6 +214,7 @@ fn load_quick_settings(store: &Store) -> QuickSettings {
         setting("quick_title_position").as_deref(),
         setting("quick_font_size").as_deref(),
         setting("quick_font_family").as_deref(),
+        setting("quick_hover_expand_enabled").as_deref(),
     )
 }
 
@@ -1211,6 +1212,10 @@ fn run_worker(
                         );
                         let _ = store
                             .set_setting("quick_font_family", settings.font_family.as_key());
+                        let _ = store.set_setting(
+                            "quick_hover_expand_enabled",
+                            if settings.hover_expand_enabled { "1" } else { "0" },
+                        );
                     }
                     WorkerCmd::RestoreDatabase { path } => {
                         let result = restore_database(

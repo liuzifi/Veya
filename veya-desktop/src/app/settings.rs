@@ -517,6 +517,33 @@ impl App {
         .spacing(12)
         .align_y(Alignment::Center);
 
+        let hover_expand_row = row![
+            icons::icon(Icon::Pin, theme::ACCENT(), 18.0),
+            column![
+                body("悬停自动展开").size(13).font(crate::font::name_font()),
+                meta("鼠标移入折叠标题栏时自动展开面板；关闭后仅手动点击展开")
+                    .size(11)
+                    .color(theme::MUTED()),
+            ]
+            .spacing(2)
+            .width(Length::Fill),
+            row![
+                flag_chip(
+                    quick.hover_expand_enabled,
+                    true,
+                    Message::QuickSetHoverExpand(true)
+                ),
+                flag_chip(
+                    quick.hover_expand_enabled,
+                    false,
+                    Message::QuickSetHoverExpand(false)
+                ),
+            ]
+            .spacing(6),
+        ]
+        .spacing(12)
+        .align_y(Alignment::Center);
+
         let title_pos_row = row![
             icons::icon(Icon::Search, theme::ACCENT(), 18.0),
             column![
@@ -642,6 +669,10 @@ impl App {
                 theme::hdivider(),
                 Space::with_height(12.0),
                 font_family_row,
+                Space::with_height(12.0),
+                theme::hdivider(),
+                Space::with_height(12.0),
+                hover_expand_row,
                 Space::with_height(12.0),
                 theme::hdivider(),
                 Space::with_height(12.0),
