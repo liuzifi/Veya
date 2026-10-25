@@ -492,18 +492,30 @@ pub fn card_button_quick(
                 },
             ),
             text_color: INK(),
-            border: stroke(border_c, border_w, 10.0),
+            border: stroke(border_c, border_w, 0.0),
             ..Default::default()
         }
     }
 }
 
 /// Narrow red bar at the left edge of a quick-paste row that has already been pasted.
-pub fn used_marker_style(_t: &Theme) -> container::Style {
-    container::Style {
-        background: Some(bg(DANGER())),
-        border: stroke(Color::TRANSPARENT, 0.0, 2.0),
-        ..Default::default()
+/// Rounded ends are used only where the marker does not join another pasted row.
+pub fn used_marker_style(joins_above: bool, joins_below: bool) -> impl Fn(&Theme) -> container::Style {
+    move |_t: &Theme| {
+        let radius = iced::border::Radius {
+            top_left: if joins_above { 0.0 } else { 2.0 },
+            top_right: if joins_above { 0.0 } else { 2.0 },
+            bottom_right: if joins_below { 0.0 } else { 2.0 },
+            bottom_left: if joins_below { 0.0 } else { 2.0 },
+        };
+        container::Style {
+            background: Some(bg(DANGER())),
+            border: iced::Border {
+                radius,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
     }
 }
 

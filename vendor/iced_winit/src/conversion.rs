@@ -173,31 +173,11 @@ pub fn window_event(
                 }
             }))
         }
-        WindowEvent::MouseWheel { delta, .. } => match delta {
-            winit::event::MouseScrollDelta::LineDelta(delta_x, delta_y) => {
-                #[cfg(target_os = "windows")]
-                {
-                    apply_windows_wheel_scroll(delta_x, delta_y)
-                }
-                #[cfg(not(target_os = "windows"))]
-                {
-                    Some(Event::Mouse(mouse::Event::WheelScrolled {
-                        delta: mouse::ScrollDelta::Lines {
-                            x: delta_x,
-                            y: delta_y,
-                        },
-                    }))
-                }
-            }
-            winit::event::MouseScrollDelta::PixelDelta(position) => {
-                Some(Event::Mouse(mouse::Event::WheelScrolled {
-                    delta: mouse::ScrollDelta::Pixels {
-                        x: position.x as f32,
-                        y: position.y as f32,
-                    },
-                }))
-            }
-        },
+        WindowEvent::MouseWheel { delta, .. } => {
+            Some(Event::Mouse(mouse::Event::WheelScrolled {
+                delta: wheel_scroll_delta(delta),
+            }))
+        }
         WindowEvent::KeyboardInput { event, .. } => Some(Event::Keyboard({
             let key = {
                 #[cfg(not(target_arch = "wasm32"))]
@@ -307,76 +287,19 @@ pub fn window_event(
     }
 }
 
-/// Wheel "lines per notch" that Windows ships with, and that iced's own scroll speed
-/// already matches: `scrollable` moves 60 px per unit of a line delta, which is about
-/// three text lines of 20 px.
-#[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
-const DEFAULT_WHEEL_LINES: f32 = 3.0;
-
-/// Value of `SPI_GETWHEELSCROLLLINES` meaning "scroll one screen at a time"
-/// (`WHEEL_PAGESCROLL`).
-#[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
-const WHEEL_PAGESCROLL_LINES: u32 = u32::MAX;
-
-/// Turns one raw wheel delta into the scroll the user configured in Windows.
-///
-/// winit sends `LineDelta(0.0, ±1.0)` per notch without consulting the system setting.
-/// iced scrolls 60 px per unit, which is exactly right for the Windows default of three
-/// lines, so the setting scales that by `lines / 3`: 3 stays as it was, 1 scrolls a third
-/// of it, 10 scrolls three and a third times as far. (Multiplying by `lines` itself would
-/// make the default three times faster than before.) When the user selects "scroll one
-/// screen at a time" (`WHEEL_PAGESCROLL`), we deliberately *don't* honor the full-screen
-/// jump: a ~600 px hop per notch is jarring in compact surfaces such as the quick paste
-/// panel and throws the list well past the content, so we collapse that mode to the same
-/// three-line default and each notch only advances a couple of rows. A setting of 0 is
-/// treated as 1.
-#[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
-fn wheel_scroll_delta(lines: u32, x: f32, y: f32) -> mouse::ScrollDelta {
-    if lines == WHEEL_PAGESCROLL_LINES {
-        // "Scroll one screen at a time" is honored by most apps as a full-viewport jump,
-        // but in our compact surfaces that overshoots the list. Fall back to the line-based
-        // default so each notch advances a couple of rows instead.
-        let factor = 1.0_f32;
-        mouse::ScrollDelta::Lines {
-            x: x * factor,
-            y: y * factor,
-        }
-    } else {
-        let factor = lines.max(1) as f32 / DEFAULT_WHEEL_LINES;
-        mouse::ScrollDelta::Lines {
-            x: x * factor,
-            y: y * factor,
+/// Keep Winit's raw wheel notches, including fractional/multiple notches.
+/// Viewport-sized paging belongs to the list widget: a system line multiplier
+/// here would turn one notch into multiple pages. Touchpad pixels pass through.
+fn wheel_scroll_delta(delta: winit::event::MouseScrollDelta) -> mouse::ScrollDelta {
+    match delta {
+        winit::event::MouseScrollDelta::LineDelta(x, y) => mouse::ScrollDelta::Lines { x, y },
+        winit::event::MouseScrollDelta::PixelDelta(position) => {
+            mouse::ScrollDelta::Pixels {
+                x: position.x as f32,
+                y: position.y as f32,
+            }
         }
     }
-}
-
-/// On Windows, applies the system "scroll lines per wheel notch" setting
-/// (`SPI_GETWHEELSCROLLLINES`) to the wheel delta; see [`wheel_scroll_delta`]. If the
-/// setting cannot be read the delta passes through unchanged.
-#[cfg(target_os = "windows")]
-fn apply_windows_wheel_scroll(delta_x: f32, delta_y: f32) -> Option<Event> {
-    use winapi::um::winuser::{SystemParametersInfoW, SPI_GETWHEELSCROLLLINES};
-
-    // Safety: SystemParametersInfoW with SPI_GETWHEELSCROLLLINES writes a single u32 into
-    // the provided buffer. The other pointer arguments are unused for this SPI code.
-    let lines = unsafe {
-        let mut lines: u32 = DEFAULT_WHEEL_LINES as u32;
-        let result = SystemParametersInfoW(
-            SPI_GETWHEELSCROLLLINES,
-            0,
-            &mut lines as *mut u32 as *mut _,
-            0,
-        );
-        (result != 0).then_some(lines)
-    };
-    let delta = match lines {
-        Some(lines) => wheel_scroll_delta(lines, delta_x, delta_y),
-        None => mouse::ScrollDelta::Lines {
-            x: delta_x,
-            y: delta_y,
-        },
-    };
-    Some(Event::Mouse(mouse::Event::WheelScrolled { delta }))
 }
 
 /// Converts a [`window::Level`] to a [`winit`] window level.
@@ -1231,33 +1154,30 @@ mod wheel_tests {
     }
 
     #[test]
-    fn the_windows_default_keeps_the_scroll_speed_iced_already_had() {
-        assert_eq!(lines(wheel_scroll_delta(3, 0.0, 1.0)), (0.0, 1.0));
-        assert_eq!(lines(wheel_scroll_delta(3, 0.0, -1.0)), (0.0, -1.0));
-    }
+    fn wheel_notches_are_not_multiplied_by_the_system_line_setting() {
+        use winit::event::MouseScrollDelta::LineDelta;
 
-    #[test]
-    fn other_settings_scale_relative_to_the_default() {
-        assert!((lines(wheel_scroll_delta(1, 0.0, 1.0)).1 - 1.0 / 3.0).abs() < 1e-6);
-        assert!((lines(wheel_scroll_delta(6, 0.0, 1.0)).1 - 2.0).abs() < 1e-6);
-        assert!((lines(wheel_scroll_delta(10, 0.0, -1.0)).1 + 10.0 / 3.0).abs() < 1e-6);
-        assert_eq!(lines(wheel_scroll_delta(0, 0.0, 3.0)), (0.0, 1.0), "0 counts as 1");
+        assert_eq!(lines(wheel_scroll_delta(LineDelta(0.0, 1.0))), (0.0, 1.0));
+        assert_eq!(lines(wheel_scroll_delta(LineDelta(0.0, -1.0))), (0.0, -1.0));
+        assert_eq!(lines(wheel_scroll_delta(LineDelta(1.0, -2.0))), (1.0, -2.0));
     }
 
     #[test]
     fn high_resolution_wheels_keep_their_fractional_notches() {
-        let (_, y) = lines(wheel_scroll_delta(3, 0.0, 0.25));
-        assert!((y - 0.25).abs() < 1e-6);
+        let delta = winit::event::MouseScrollDelta::LineDelta(0.0, 0.25);
+        assert_eq!(lines(wheel_scroll_delta(delta)), (0.0, 0.25));
     }
 
     #[test]
-    fn page_scroll_falls_back_to_a_line_delta() {
-        // "Scroll one screen at a time" must not jump a full viewport; in compact surfaces
-        // such as the quick paste panel that overshoots. We collapse it to the default
-        // three-line delta (factor 1.0) so each notch only advances a couple of rows.
-        assert_eq!(
-            lines(wheel_scroll_delta(u32::MAX, 0.0, -1.0)),
-            (0.0, -1.0)
+    fn touchpad_pixels_are_not_converted_to_lines() {
+        let delta = winit::event::MouseScrollDelta::PixelDelta(
+            winit::dpi::PhysicalPosition::new(12.5, -23.0),
         );
+        match wheel_scroll_delta(delta) {
+            mouse::ScrollDelta::Pixels { x, y } => {
+                assert_eq!((x, y), (12.5, -23.0));
+            }
+            mouse::ScrollDelta::Lines { .. } => panic!("expected a pixel delta"),
+        }
     }
 }

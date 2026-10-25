@@ -1,4 +1,4 @@
-//! The hotkey picker reuses bounded worker history and typed clipboard replay.
+﻿//! The hotkey picker reuses bounded worker history and typed clipboard replay.
 use super::history::card_menu_origin;
 use super::*;
 use crate::capture::QuickTitlePosition;
@@ -69,9 +69,8 @@ impl QuickMetrics {
         let row_spacing = (8.0 * scale).max(6.0);
         let row_padding = (6.0 * scale).max(4.0);
         let inner_spacing = (3.0 * scale).max(2.0);
-        // Default 13 → 4 px gap; scales with font size so larger panels get a
-        // proportionally wider breathing space between cards (max 6 px).
-        let row_gap = (4.0 * scale).max(3.0).min(6.0);
+        // Keep rows adjacent so pasted markers can form an uninterrupted line.
+        let row_gap = 0.0;
         Self {
             body,
             meta,
@@ -147,6 +146,8 @@ struct Strip {
     last_press: Option<std::time::Instant>,
     /// Window size to return to when unfolding.
     expanded_size: iced::Size,
+    /// Monotonic token invalidates delayed hover-fold events after re-entry.
+    hover_epoch: u64,
     /// Whether the panel was auto-expanded because the mouse hovered over the
     /// collapsed strip.  When true, moving the mouse off the panel folds it
     /// back; clicking the fold button clears the flag and keeps the panel
@@ -273,7 +274,7 @@ impl App {
             let window = self.guard_window_task(unfold.chain(activate_window(generation)));
             return Task::batch([query, window]);
         }
-        let settings = self.state.quick_settings;
+        let settings = self.state.quick_settings.clone();
         let window_height = self.quick_window_height();
         let level = if settings.always_on_top {
             set_window_level(iced::window::Level::AlwaysOnTop)
@@ -376,7 +377,8 @@ impl App {
         let leave = self.leave_strip_state();
         let size = self.restore_management_state();
         self.window_hidden = false;
-        self.set_history_active(self.page == Page::History);
+        self.page = Page::History;
+        self.set_history_active(true);
         let query = self.request_history_query(false);
         let window = leave.chain(iced::window::get_latest().then(move |id| {
             let resize = match (id, size) {
@@ -456,15 +458,19 @@ impl App {
         self.window_hidden = true;
         self.set_history_active(false);
         let token = self.window_generation.clone();
-        let window = hide_window()
-            .chain(leave)
+        let hide = hide_window(generation, token.clone());
+        let final_hide = hide_window(generation, token);
+        let window = hide
+            // Batch keeps an empty cleanup stream from cancelling the hide.
+            .chain(Task::batch([leave]))
             .chain(iced::window::get_latest().then(move |id| {
                 let Some(id) = id else { return Task::none() };
-                let resize = size
-                    .map(|size| iced::window::resize(id, size))
-                    .unwrap_or_else(Task::none);
-                resize.chain(window_taskbar_role(id, false, generation, token.clone()))
+                size.map(|size| iced::window::resize(id, size))
+                    .unwrap_or_else(Task::none)
             }))
+            // Native geometry/level changes must never be the last operation:
+            // they can expose the shared window after its logical hide.
+            .chain(final_hide)
             .chain(Task::done(Message::QuickHidden {
                 generation,
                 target,
@@ -611,10 +617,11 @@ impl App {
                     // A pinned picker stays on screen while the paste is sent.
                     return paste;
                 }
-                self.advance_window_generation();
+                let generation = self.advance_window_generation();
                 self.window_hidden = true;
                 self.set_history_active(false);
-                self.guard_window_task(hide_window().chain(paste))
+                let hide = hide_window(generation, self.window_generation.clone());
+                self.guard_window_task(hide.chain(paste))
             }
         }
     }
@@ -654,17 +661,9 @@ impl App {
             let generation = self.advance_window_generation();
             self.guard_window_task(activate_window(generation))
         } else {
-            let size = self.restore_management_state();
-            let generation = self.advance_window_generation();
-            let token = self.window_generation.clone();
-            let window = iced::window::get_latest().then(move |id| {
-                let Some(id) = id else { return Task::none() };
-                let resize = size
-                    .map(|size| iced::window::resize(id, size))
-                    .unwrap_or_else(Task::none);
-                resize.chain(window_taskbar_role(id, false, generation, token.clone()))
-            });
-            self.guard_window_task(window)
+            // Use the same final-hide path as closing the picker. A resize-only
+            // success path could leave a visible blank manager behind.
+            self.dismiss_quick(false)
         }
     }
 
@@ -831,6 +830,8 @@ impl App {
         let Some(quick) = &mut self.quick else {
             return Task::none();
         };
+        // Re-entering during native resize invalidates any queued exit event.
+        quick.strip.hover_epoch = quick.strip.hover_epoch.wrapping_add(1);
         if !quick.strip.folded {
             return Task::none();
         }
@@ -844,6 +845,21 @@ impl App {
             return Task::none();
         };
         if !quick.strip.hover_expanded {
+            return Task::none();
+        }
+        // Delay the fold slightly because a resize can briefly report the pointer
+        // outside the old bounds. A new enter increments the epoch and cancels it.
+        quick.strip.hover_epoch = quick.strip.hover_epoch.wrapping_add(1);
+        let epoch = quick.strip.hover_epoch;
+        iced::Task::future(iced::time::sleep(std::time::Duration::from_millis(100)))
+            .map(move |_| Message::QuickHoverFoldAfter(epoch))
+    }
+
+    pub(super) fn quick_hover_fold_after(&mut self, epoch: u64) -> Task<Message> {
+        let Some(quick) = &mut self.quick else {
+            return Task::none();
+        };
+        if !quick.strip.hover_expanded || quick.strip.hover_epoch != epoch {
             return Task::none();
         }
         quick.strip.hover_expanded = false;
@@ -1063,14 +1079,20 @@ impl App {
                         .into(),
                     None => Space::with_width(Length::Fixed(metrics.number_column_width)).into(),
                 };
-                // A red bar at the left edge marks a row that was already pasted. Rows without
-                // one keep an empty slot so the columns line up.
+                // Join pasted markers to the neighboring row when that row is also marked.
+                let pasted_above = index > 0
+                    && self.state.cards[index - 1].has_paste_activity;
+                let pasted_below = self
+                    .state
+                    .cards
+                    .get(index + 1)
+                    .is_some_and(|next| next.has_paste_activity);
                 let used_marker: Element<'_, Message> = if card.has_paste_activity {
                     container(Space::new(
                         Length::Fixed(metrics.used_marker_width),
                         Length::Fill,
                     ))
-                    .style(theme::used_marker_style)
+                    .style(theme::used_marker_style(pasted_above, pasted_below))
                     .into()
                 } else {
                     Space::with_width(Length::Fixed(metrics.used_marker_width)).into()
@@ -1109,12 +1131,13 @@ impl App {
                 };
                 rows = rows.push(row);
             }
-            scrollable(rows)
-                .id(quick_scroll_id())
-                .height(Length::Fill)
-                .style(theme::scroll_style)
-                .on_scroll(|viewport: scrollable::Viewport| Message::QuickScrolled(viewport))
-                .into()
+            paging::page_scroll(
+                scrollable(rows)
+                    .id(quick_scroll_id())
+                    .height(Length::Fill)
+                    .style(theme::scroll_style)
+                    .on_scroll(|viewport: scrollable::Viewport| Message::QuickScrolled(viewport)),
+            )
         };
         let footer = row![
             button(meta("设置").size(metrics.meta + 1.0).font(font))
@@ -1170,8 +1193,9 @@ impl App {
         .height(Length::Fill)
         .style(theme::shell_style)
         .into();
-        // When the panel was auto-expanded by hovering over the folded strip,
-        // wrap the whole panel so that moving the mouse off it folds it back.
+        // When hover-opened, let the pointer briefly cross the newly exposed area
+        // while the native window resizes. The delayed fold is invalidated if it
+        // re-enters the panel, avoiding resize/hover feedback flicker.
         let base = if quick.strip.hover_expanded {
             mouse_area(base).on_exit(Message::QuickHoverFold).into()
         } else {
@@ -2529,6 +2553,133 @@ pub(in crate::app) mod tests {
     }
 
     #[test]
+    fn dismissal_emits_a_hide_before_resize_and_a_final_hide_after_it() {
+        for after_paste in [false, true] {
+            let mut app = isolated_app();
+            let saved_size = app.window_size;
+            let _ = app.show_quick(None);
+            let task = if after_paste {
+                let quick = app.quick.as_mut().unwrap();
+                quick.pending = Some(7);
+                quick.sending = true;
+                app.window_hidden = true;
+                app.finish_quick_paste(7, Ok(()))
+            } else {
+                app.dismiss_quick(true)
+            };
+            let actions = window_actions(task);
+            assert_eq!(
+                actions,
+                ["hide", "resize", "hide", "completion"],
+                "both closing and paste success must execute the native hides"
+            );
+            assert_eq!(app.window_size, saved_size);
+            assert!(app.window_hidden);
+        }
+    }
+
+    fn window_actions(task: Task<Message>) -> Vec<&'static str> {
+        use iced::futures::StreamExt;
+        use iced_runtime::{window, Action};
+
+        let mut stream = iced_runtime::task::into_stream(task).expect("window task stream");
+        let id = iced::window::Id::unique();
+        let mut actions = Vec::new();
+        loop {
+            let action = iced::futures::executor::block_on(stream.next());
+            match action {
+                Some(Action::Window(window::Action::GetLatest(sender))) => {
+                    assert!(sender.send(Some(id)).is_ok());
+                }
+                Some(Action::Window(window::Action::ChangeMode(_, iced::window::Mode::Hidden))) => {
+                    actions.push("hide");
+                }
+                Some(Action::Window(window::Action::Resize(_, _))) => actions.push("resize"),
+                Some(Action::Window(window::Action::RunWithHandle(_, callback))) => {
+                    // No real HWND is needed here. Dropping the callback closes
+                    // its response channel so the task can keep progressing.
+                    drop(callback);
+                }
+                Some(Action::Output(Message::QuickHidden { .. })) => actions.push("completion"),
+                Some(_) => {}
+                None => break,
+            }
+        }
+        actions
+    }
+
+    #[test]
+    fn successful_unpinned_paste_always_takes_the_hidden_exit_path() {
+        for hidden in [false, true] {
+            let mut app = isolated_app();
+            let saved_size = app.window_size;
+            let _ = app.show_quick(None);
+            let quick = app.quick.as_mut().unwrap();
+            quick.pending = Some(7);
+            quick.sending = true;
+            app.window_hidden = hidden;
+            app.window_size = iced::Size::new(QUICK_WIDTH, 320.0);
+
+            let _ = app.finish_quick_paste(7, Ok(()));
+
+            assert!(app.window_hidden);
+            assert!(app.quick.is_none());
+            assert!(!app.history_active);
+            assert_eq!(app.window_size, saved_size);
+            assert_eq!(app.search, "saved search");
+            assert_eq!(app.window_tasks.len(), 1);
+        }
+    }
+
+    #[test]
+    fn ordinary_activation_does_not_reopen_the_last_settings_page() {
+        let mut app = isolated_app();
+        app.page = Page::Settings;
+        app.window_hidden = true;
+        let _ = app.apply_window_action(WindowAction::Show);
+
+        assert_eq!(app.page, Page::History);
+        assert!(!app.window_hidden);
+        assert!(app.quick.is_none());
+        assert!(app.history_active);
+    }
+
+    #[test]
+    fn settings_only_open_after_the_explicit_settings_action() {
+        let mut app = isolated_app();
+        app.page = Page::Settings;
+        app.window_hidden = true;
+        let _ = app.show_quick(None);
+        let _ = app.dismiss_quick(true);
+
+        assert!(app.window_hidden);
+        assert!(app.quick.is_none());
+        assert_eq!(app.page, Page::History);
+
+        let _ = app.apply_window_action(WindowAction::Settings);
+        assert!(!app.window_hidden);
+        assert_eq!(app.page, Page::Settings);
+        assert!(!app.history_active);
+    }
+
+    #[test]
+    fn pinned_paste_success_keeps_only_the_picker_visible() {
+        let mut app = isolated_app();
+        let _ = app.show_quick(None);
+        let quick = app.quick.as_mut().unwrap();
+        quick.strip.pinned = true;
+        quick.pending = Some(7);
+        quick.sending = true;
+
+        let _ = app.finish_quick_paste(7, Ok(()));
+
+        assert!(!app.window_hidden);
+        assert!(app.quick.is_some());
+        assert_eq!(app.page, Page::History);
+        assert!(app.history_active);
+    }
+
+    #[test]
     fn rapid_toggle_aborts_old_window_tasks_before_the_next_session() {
         // Phase 7 regression guard: opening the picker, dismissing it, then
         // reopening must abort the in-flight window stream from the previous
@@ -2806,6 +2957,25 @@ pub(in crate::app) mod tests {
         render_at(&app, iced::Size::new(QUICK_WIDTH, QUICK_HEIGHT));
         let _ = app.update(Message::QuickToggleFold);
         render_at(&app, iced::Size::new(STRIP_WIDTH, QUICK_HEIGHT));
+    }
+
+    #[test]
+    fn delayed_hover_fold_is_cancelled_by_reentry_and_manual_toggle() {
+        let mut app = quick_app();
+        app.window_size = iced::Size::new(QUICK_WIDTH, QUICK_HEIGHT);
+        let _ = app.update(Message::QuickToggleFold);
+        let _ = app.update(Message::QuickHoverExpand);
+        let _ = app.update(Message::QuickHoverFold);
+        let epoch = strip(&app).hover_epoch;
+        let _ = app.update(Message::QuickHoverExpand);
+        let _ = app.update(Message::QuickHoverFoldAfter(epoch));
+        assert!(!strip(&app).folded && strip(&app).hover_expanded);
+
+        let _ = app.update(Message::QuickHoverFold);
+        let epoch = strip(&app).hover_epoch;
+        let _ = app.update(Message::QuickToggleFold);
+        let _ = app.update(Message::QuickHoverFoldAfter(epoch));
+        assert!(!strip(&app).folded && !strip(&app).hover_expanded);
     }
 
     #[test]

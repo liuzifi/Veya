@@ -14,7 +14,7 @@ veya-core = { workspace = true }
 veya-windows = { workspace = true }
 veya-storage = { workspace = true }
 # Like Kite, select the software renderer at build time; do not include wgpu.
-iced = { version = "0.13", default-features = false, features = ["tiny-skia", "tokio", "image", "svg", "fira-sans", "auto-detect-theme"] }
+iced = { version = "0.13", default-features = false, features = ["tiny-skia", "tokio", "image", "svg", "fira-sans", "auto-detect-theme", "advanced"] }
 iced_graphics = "0.13"
 image = { version = "0.25", default-features = false, features = ["png"] }
 png = "0.18"

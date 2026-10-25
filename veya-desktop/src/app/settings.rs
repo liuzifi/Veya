@@ -313,7 +313,7 @@ impl App {
         .style(theme::panel_style);
 
         // Quick paste panel behavior and appearance.
-        let quick = self.state.quick_settings;
+        let quick = self.state.quick_settings.clone();
         let flag_chip = |current: bool, want: bool, message: Message| {
             button(text(if want { "开启" } else { "关闭" }).size(12))
                 .on_press(message)
@@ -335,10 +335,10 @@ impl App {
                 .padding(pad(6.0, 12.0, 6.0, 12.0))
         };
         let font_family_chip =
-            |current: crate::capture::QuickFontFamily, want: crate::capture::QuickFontFamily| {
+            |current: &crate::capture::QuickFontFamily, want: crate::capture::QuickFontFamily| {
                 button(text(want.label()).size(12))
                     .on_press(Message::QuickSetFontFamily(want))
-                    .style(theme::chip_button(current == want))
+                    .style(theme::chip_button(current == &want))
                     .padding(pad(6.0, 12.0, 6.0, 12.0))
             };
 
@@ -577,13 +577,12 @@ impl App {
         .spacing(12)
         .align_y(Alignment::Center);
 
-        let font_size_changed = self.quick_font_size_input != quick.font_size.to_string();
         let font_size_row = row![
             icons::icon(Icon::Text, theme::ACCENT(), 18.0),
             column![
                 body("文字大小").size(13).font(crate::font::name_font()),
                 meta(format!(
-                    "快捷面板正文字号（{}–{} px），调整后序号/图标/间距同步缩放",
+                    "{}–{} px；即时调整快捷面板文字、序号和行距",
                     crate::capture::QuickSettings::MIN_FONT_SIZE,
                     crate::capture::QuickSettings::MAX_FONT_SIZE
                 ))
@@ -592,41 +591,41 @@ impl App {
             ]
             .spacing(2)
             .width(Length::Fill),
-            text_input("13", &self.quick_font_size_input)
-                .on_input(Message::QuickFontSizeInput)
-                .on_submit(Message::QuickApplyFontSize)
-                .padding(pad(6.0, 10.0, 6.0, 10.0))
-                .size(12)
-                .style(theme::field_style)
-                .width(Length::Fixed(84.0)),
-            text("px").size(12).color(theme::MUTED()),
-            button(text("应用").size(12))
-                .on_press_maybe(font_size_changed.then_some(Message::QuickApplyFontSize))
-                .style(if font_size_changed {
-                    theme::primary_button
-                } else {
-                    theme::action_button
-                })
-                .padding(pad(6.0, 12.0, 6.0, 12.0)),
+            button(text("−").size(16))
+                .on_press_maybe((quick.font_size > crate::capture::QuickSettings::MIN_FONT_SIZE)
+                    .then_some(Message::QuickSetFontSize(quick.font_size.saturating_sub(1))))
+                .style(theme::action_button)
+                .padding(pad(4.0, 10.0, 4.0, 10.0)),
+            container(text(format!("{} px", quick.font_size)).size(13))
+                .width(Length::Fixed(58.0))
+                .center_x(Length::Fill),
+            button(text("+").size(16))
+                .on_press_maybe((quick.font_size < crate::capture::QuickSettings::MAX_FONT_SIZE)
+                    .then_some(Message::QuickSetFontSize(quick.font_size + 1)))
+                .style(theme::action_button)
+                .padding(pad(4.0, 10.0, 4.0, 10.0)),
         ]
-        .spacing(12)
+        .spacing(8)
         .align_y(Alignment::Center);
 
+        let available_fonts = crate::capture::QuickFontFamily::available();
+        let font_chips: Vec<Element<'_, Message>> = available_fonts
+            .into_iter()
+            .map(|font| {
+                font_family_chip(&quick.font_family, font).into()
+            })
+            .collect();
         let font_family_row = row![
             icons::icon(Icon::Code, theme::ACCENT(), 18.0),
             column![
                 body("字体").size(13).font(crate::font::name_font()),
-                meta("快捷面板正文字体；“等宽”仅适合英文/数字内容")
+                meta("仅列出当前系统已安装、支持中文的字体；更改后立即生效")
                     .size(11)
                     .color(theme::MUTED()),
             ]
             .spacing(2)
             .width(Length::Fill),
-            row![
-                font_family_chip(quick.font_family, crate::capture::QuickFontFamily::Default),
-                font_family_chip(quick.font_family, crate::capture::QuickFontFamily::Mono),
-            ]
-            .spacing(6),
+            row(font_chips).spacing(6),
         ]
         .spacing(12)
         .align_y(Alignment::Center);

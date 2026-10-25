@@ -155,68 +155,59 @@ mod native {
         (length > 0).then(|| PathBuf::from(OsString::from_wide(&file[..length])))
     }
 
-    /// Folder picker backed by `SHBrowseForFolderW`. The legacy dialog is used
-    /// because it is available on every supported Windows version (including
-    /// Win7 without SP1) and matches the look-and-feel of the file pickers
-    /// above. `title` is shown above the tree as the banner text; `owner_title`
-    /// locates the owning window so the dialog is properly modal.
-    ///
-    /// `pidlRoot` is left null so browsing starts at the desktop. The calling
-    /// thread runs on a plain OS thread (see `veya-desktop`'s `run_blocking`), so
-    /// it initializes a COM apartment itself — `BIF_USENEWUI` requires one. The
-    /// returned PIDL is a raw pointer freed with `CoTaskMemFree`; our apartment
-    /// (when we created it) is released on every exit path.
+    /// Explorer-style folder picker, available since Windows Vista. It provides
+    /// the navigation pane, address bar, search, and new-folder commands instead
+    /// of the legacy tree-only dialog. Call on a blocking worker thread.
     pub fn browse_for_folder(title: &str, owner_title: &str) -> Option<PathBuf> {
+        use windows::core::w;
         use windows::Win32::System::Com::{
-            CoInitializeEx, CoTaskMemFree, CoUninitialize, COINIT_APARTMENTTHREADED,
+            CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_INPROC_SERVER,
+            COINIT_APARTMENTTHREADED,
         };
         use windows::Win32::UI::Shell::{
-            SHBrowseForFolderW, SHGetPathFromIDListW, BIF_RETURNONLYFSDIRS, BROWSEINFOW,
+            FileOpenDialog, IFileOpenDialog, FOS_FORCEFILESYSTEM, FOS_NOCHANGEDIR, FOS_PATHMUSTEXIST,
+            FOS_PICKFOLDERS, SIGDN_FILESYSPATH,
         };
-        const BIF_USENEWUI: u32 = 0x00000040;
 
         let title = wide(title);
         let owner_title = wide(owner_title);
-        let owner = unsafe { FindWindowW(PCWSTR::null(), PCWSTR(owner_title.as_ptr())) }
-            .unwrap_or_default();
-
-        let com = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
-
-        let info = BROWSEINFOW {
-            hwndOwner: owner,
-            pidlRoot: std::ptr::null_mut(),
-            pszDisplayName: PWSTR::null(),
-            lpszTitle: PCWSTR(title.as_ptr()),
-            ulFlags: BIF_RETURNONLYFSDIRS | BIF_USENEWUI,
-            lpfn: None,
-            lParam: windows::Win32::Foundation::LPARAM(0),
-            iImage: 0,
-        };
-
-        let pidl = unsafe { SHBrowseForFolderW(&info) };
-        let picked = if pidl.is_null() {
-            None
-        } else {
-            // `SHGetPathFromIDListW` writes into a fixed 260-unit buffer.
-            let mut buffer = [0u16; 260];
-            let ok = unsafe { SHGetPathFromIDListW(pidl, &mut buffer) };
-            unsafe { CoTaskMemFree(Some(pidl as *const core::ffi::c_void)) };
-            if ok.as_bool() {
-                let length = buffer
-                    .iter()
-                    .position(|unit| *unit == 0)
-                    .unwrap_or(buffer.len());
-                (length > 0).then(|| PathBuf::from(OsString::from_wide(&buffer[..length])))
-            } else {
-                None
-            }
-        };
-
-        // Balance our own successful initialization (S_OK); leave foreign
-        // apartments (S_FALSE) and refused ones (RPC_E_CHANGED_MODE) alone.
-        if com.is_ok() {
-            unsafe { CoUninitialize() };
+        let owner = unsafe { FindWindowW(PCWSTR::null(), PCWSTR(owner_title.as_ptr())) }.ok();
+        if unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.is_err() {
+            return None;
         }
+
+        // The closure releases all COM interfaces before CoUninitialize, also
+        // on cancellation or an API failure. No fixed MAX_PATH buffer is used.
+        let picked = (|| {
+            let dialog: IFileOpenDialog =
+                unsafe { CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER) }.ok()?;
+            let options = unsafe { dialog.GetOptions() }.ok()?;
+            unsafe {
+                dialog
+                    .SetOptions(
+                        options
+                            | FOS_PICKFOLDERS
+                            | FOS_FORCEFILESYSTEM
+                            | FOS_PATHMUSTEXIST
+                            | FOS_NOCHANGEDIR,
+                    )
+                    .ok()?;
+                dialog.SetTitle(PCWSTR(title.as_ptr())).ok()?;
+                dialog.SetOkButtonLabel(w!("选择文件夹")).ok()?;
+                dialog.Show(owner).ok()?;
+            }
+            let item = unsafe { dialog.GetResult() }.ok()?;
+            let path = unsafe { item.GetDisplayName(SIGDN_FILESYSPATH) }.ok()?;
+            if path.is_null() {
+                return None;
+            }
+            let picked = unsafe { OsString::from_wide(path.as_wide()) };
+            unsafe { CoTaskMemFree(Some(path.0.cast())) };
+            (!picked.is_empty()).then(|| PathBuf::from(picked))
+        })();
+
+        // Both S_OK and S_FALSE increment COM's initialization count.
+        unsafe { CoUninitialize() };
         picked
     }
 }

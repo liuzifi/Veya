@@ -16,8 +16,8 @@ use windows::Win32::UI::Shell::{ITaskbarList, TaskbarList};
 use windows::Win32::UI::WindowsAndMessaging::{
     FindWindowExW, GetCursorPos, GetForegroundWindow, GetGUIThreadInfo, GetWindowLongPtrW,
     GetWindowThreadProcessId, IsWindowVisible, SetLayeredWindowAttributes, SetWindowLongPtrW,
-    SetWindowPos, GUITHREADINFO, GWL_EXSTYLE, LWA_ALPHA, SWP_FRAMECHANGED, SWP_NOACTIVATE,
-    SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_TOOLWINDOW,
+    SetWindowPos, ShowWindow, GUITHREADINFO, GWL_EXSTYLE, LWA_ALPHA, SWP_FRAMECHANGED, SWP_NOACTIVATE,
+    SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_TOOLWINDOW,
 };
 
 type GetDpiForMonitorFn = unsafe extern "system" fn(HMONITOR, i32, *mut u32, *mut u32) -> HRESULT;
@@ -290,6 +290,24 @@ pub fn set_window_taskbar_visible(raw_hwnd: isize, visible: bool) -> bool {
             CoUninitialize();
         }
         style_ok && shell_result.is_ok()
+    }
+}
+
+/// Hide the actual process-owned HWND even if Winit's cached visibility already
+/// says it is hidden. Run on the window thread after all resize/level changes.
+pub fn hide_window(raw_hwnd: isize) -> bool {
+    let hwnd = HWND(raw_hwnd as *mut core::ffi::c_void);
+    unsafe {
+        let mut process_id = 0;
+        if hwnd.is_invalid()
+            || GetWindowThreadProcessId(hwnd, Some(&mut process_id)) == 0
+            || process_id != GetCurrentProcessId()
+        {
+            return false;
+        }
+        // ShowWindow returns the previous visibility, not success/failure.
+        let _ = ShowWindow(hwnd, SW_HIDE);
+        !IsWindowVisible(hwnd).as_bool()
     }
 }
 

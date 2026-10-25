@@ -178,18 +178,19 @@ impl App {
                 list = list.push(self.card_widget(card));
             }
 
-            scrollable(list)
-                .id(history_scroll_id())
-                .direction(iced::widget::scrollable::Direction::Vertical(
-                    iced::widget::scrollable::Scrollbar::new()
-                        .width(4)
-                        .scroller_width(4)
-                        .margin(2),
-                ))
-                .style(theme::scroll_style)
-                .height(Length::Fill)
-                .on_scroll(|viewport: scrollable::Viewport| Message::HistoryScrolled(viewport))
-                .into()
+            paging::page_scroll(
+                scrollable(list)
+                    .id(history_scroll_id())
+                    .direction(iced::widget::scrollable::Direction::Vertical(
+                        iced::widget::scrollable::Scrollbar::new()
+                            .width(4)
+                            .scroller_width(4)
+                            .margin(2),
+                    ))
+                    .style(theme::scroll_style)
+                    .height(Length::Fill)
+                    .on_scroll(|viewport: scrollable::Viewport| Message::HistoryScrolled(viewport)),
+            )
         };
 
         column![content]

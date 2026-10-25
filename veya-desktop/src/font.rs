@@ -43,6 +43,42 @@ pub fn install() -> Font {
     init().font
 }
 
+/// 已登记且可用于简体中文的系统字族（固定白名单，避免选到无汉字字体）。
+pub fn cjk_families() -> Vec<&'static str> {
+    let _ = init();
+    let mut fs = iced_graphics::text::font_system()
+        .write()
+        .expect("iced font system");
+    let db = fs.raw().db_mut();
+    CJK_FAMILIES
+        .iter()
+        .copied()
+        .filter(|name| {
+            db.faces().any(|face| {
+                face.families
+                    .iter()
+                    .any(|(family, _)| family.eq_ignore_ascii_case(name))
+            })
+        })
+        .collect()
+}
+
+/// 验证并规范化持久化的字体名称；旧版 `default`/`mono` 键兼容回默认中文字体。
+pub fn resolve_cjk_family(value: &str) -> Option<&'static str> {
+    if value == "default" || value == "mono" || value.trim().is_empty() {
+        return cjk_families().into_iter().next().or_else(|| Some("Microsoft YaHei UI"));
+    }
+    cjk_families()
+        .into_iter()
+        .find(|name| name.eq_ignore_ascii_case(value.trim()))
+}
+
+/// 为系统中已确认存在的中文字体创建 iced 字体描述；未知字体回退到微软雅黑。
+pub fn font_for_cjk_family(value: &str) -> Font {
+    let name = resolve_cjk_family(value).unwrap_or("Microsoft YaHei UI");
+    Font { family: Family::Name(name), ..ui_font() }
+}
+
 pub fn ui_font() -> Font {
     init().font
 }

@@ -1,4 +1,4 @@
-//! Iced shell: sidebar + search/filters + history list + flow detail.
+﻿//! Iced shell: sidebar + search/filters + history list + flow detail.
 //! Layout precisely aligns with Fig 1 UI mockup: glowing cards, deep navy theme,
 //! unified vector icons, 4-action quick toolbar, dual source/flow cards,
 //! and clean non-redundant detail view + modular settings panel.
@@ -29,6 +29,7 @@ use veya_windows::platform::{PasteTarget, WindowSignal};
 mod data;
 mod detail;
 mod history;
+mod paging;
 mod quick;
 mod settings;
 mod tracking;
@@ -80,10 +81,41 @@ fn activate_window(generation: u64) -> Task<Message> {
     })
 }
 
-fn hide_window() -> Task<Message> {
-    iced::window::get_latest().then(|id| {
-        id.map(|id| iced::window::change_mode(id, iced::window::Mode::Hidden))
-            .unwrap_or_else(Task::none)
+fn hide_window(
+    generation: u64,
+    token: std::sync::Arc<std::sync::atomic::AtomicU64>,
+) -> Task<Message> {
+    iced::window::get_latest().then(move |id| {
+        let Some(id) = id else { return Task::none() };
+        let token = token.clone();
+        // In Iced 0.13, chaining Task::none() discards the preceding task.
+        // Batch preserves an empty optional step without dropping the hide.
+        let hide = iced::window::change_mode(id, iced::window::Mode::Hidden).chain(Task::batch([
+            window_taskbar_role(id, false, generation, token.clone()),
+        ]));
+        #[cfg(windows)]
+        {
+            // Winit caches its visibility flag. Native restore/style operations
+            // can show the HWND again without updating that flag, making a
+            // second set_visible(false) a no-op. Finish with a real native hide.
+            hide.chain(
+                iced::window::run_with_handle(id, move |handle| {
+                    if token.load(std::sync::atomic::Ordering::SeqCst) != generation {
+                        return;
+                    }
+                    if let iced::window::raw_window_handle::RawWindowHandle::Win32(handle) =
+                        handle.as_raw()
+                    {
+                        let _ = veya_windows::platform::window_place::hide_window(handle.hwnd.get());
+                    }
+                })
+                .then(|()| Task::none()),
+            )
+        }
+        #[cfg(not(windows))]
+        {
+            hide
+        }
     })
 }
 
@@ -417,8 +449,10 @@ pub enum Message {
     QuickToggleFold,
     /// Mouse entered the strip while folded — auto-expand.
     QuickHoverExpand,
-    /// Mouse left the panel while hover-expanded — auto-fold.
+    /// Mouse left the panel while hover-expanded — schedule an auto-fold.
     QuickHoverFold,
+    /// Finish the delayed hover fold only if no re-entry invalidated it.
+    QuickHoverFoldAfter(u64),
     /// Enable/disable the "auto-expand on hover" setting.
     QuickSetHoverExpand(bool),
     QuickUnfocused,
@@ -557,6 +591,7 @@ pub enum Message {
     QuickApplyOpacity,
     QuickFontSizeInput(String),
     QuickApplyFontSize,
+    QuickSetFontSize(u32),
     QuickSetFontFamily(crate::capture::QuickFontFamily),
     QuickSetTitlePos(crate::capture::QuickTitlePosition),
     StartHotkeyRecord,
@@ -945,8 +980,9 @@ impl App {
             Message::QuickToggleFold => self.quick_toggle_fold(),
             Message::QuickHoverExpand => self.quick_hover_expand(),
             Message::QuickHoverFold => self.quick_hover_fold(),
+            Message::QuickHoverFoldAfter(epoch) => self.quick_hover_fold_after(epoch),
             Message::QuickSetHoverExpand(enabled) => {
-                let mut cfg = self.state.quick_settings;
+                let mut cfg = self.state.quick_settings.clone();
                 cfg.hover_expand_enabled = enabled;
                 self.state.quick_settings = cfg;
                 let _ = self.worker.cmd_tx.send(WorkerCmd::SetQuickSettings(cfg));
@@ -1532,7 +1568,7 @@ impl App {
                 Task::none()
             }
             Message::QuickToggleMoveTop(on) => {
-                let mut cfg = self.state.quick_settings;
+                let mut cfg = self.state.quick_settings.clone();
                 cfg.move_to_top_after_paste = on;
                 self.state.quick_settings = cfg;
                 let _ = self.worker.cmd_tx.send(WorkerCmd::SetQuickSettings(cfg));
@@ -1545,7 +1581,7 @@ impl App {
             Message::QuickApplyLines => {
                 match QuickSettings::parse_display_lines(&self.quick_lines_input) {
                     Some(lines) => {
-                        let mut cfg = self.state.quick_settings;
+                        let mut cfg = self.state.quick_settings.clone();
                         cfg.display_lines = lines;
                         self.quick_lines_input = lines.to_string();
                         self.state.quick_settings = cfg;
@@ -1564,14 +1600,14 @@ impl App {
                 Task::none()
             }
             Message::QuickSetPopupPos(position) => {
-                let mut cfg = self.state.quick_settings;
+                let mut cfg = self.state.quick_settings.clone();
                 cfg.popup_position = position;
                 self.state.quick_settings = cfg;
                 let _ = self.worker.cmd_tx.send(WorkerCmd::SetQuickSettings(cfg));
                 Task::none()
             }
             Message::QuickToggleAlwaysOnTop(on) => {
-                let mut cfg = self.state.quick_settings;
+                let mut cfg = self.state.quick_settings.clone();
                 cfg.always_on_top = on;
                 self.state.quick_settings = cfg;
                 // A live picker window follows the new level immediately.
@@ -1588,7 +1624,7 @@ impl App {
                 }
             }
             Message::QuickToggleAutoDismiss(on) => {
-                let mut cfg = self.state.quick_settings;
+                let mut cfg = self.state.quick_settings.clone();
                 cfg.auto_dismiss = on;
                 self.state.quick_settings = cfg;
                 let _ = self.worker.cmd_tx.send(WorkerCmd::SetQuickSettings(cfg));
@@ -1601,7 +1637,7 @@ impl App {
             Message::QuickApplyOpacity => {
                 match QuickSettings::parse_opacity(&self.quick_opacity_input) {
                     Some(opacity) => {
-                        let mut cfg = self.state.quick_settings;
+                        let mut cfg = self.state.quick_settings.clone();
                         cfg.opacity = opacity;
                         self.quick_opacity_input = (opacity * 100.0).round().to_string();
                         self.state.quick_settings = cfg;
@@ -1629,10 +1665,19 @@ impl App {
                 self.quick_font_size_input = digits_only(&value, 2);
                 Task::none()
             }
+            Message::QuickSetFontSize(size) => {
+                let size = size.clamp(QuickSettings::MIN_FONT_SIZE, QuickSettings::MAX_FONT_SIZE);
+                let mut cfg = self.state.quick_settings.clone();
+                cfg.font_size = size;
+                self.quick_font_size_input = size.to_string();
+                self.state.quick_settings = cfg;
+                let _ = self.worker.cmd_tx.send(WorkerCmd::SetQuickSettings(cfg));
+                Task::none()
+            }
             Message::QuickApplyFontSize => {
                 match QuickSettings::parse_font_size(&self.quick_font_size_input) {
                     Some(size) => {
-                        let mut cfg = self.state.quick_settings;
+                        let mut cfg = self.state.quick_settings.clone();
                         cfg.font_size = size;
                         self.quick_font_size_input = size.to_string();
                         self.state.quick_settings = cfg;
@@ -1651,14 +1696,14 @@ impl App {
                 Task::none()
             }
             Message::QuickSetFontFamily(family) => {
-                let mut cfg = self.state.quick_settings;
+                let mut cfg = self.state.quick_settings.clone();
                 cfg.font_family = family;
                 self.state.quick_settings = cfg;
                 let _ = self.worker.cmd_tx.send(WorkerCmd::SetQuickSettings(cfg));
                 Task::none()
             }
             Message::QuickSetTitlePos(position) => {
-                let mut cfg = self.state.quick_settings;
+                let mut cfg = self.state.quick_settings.clone();
                 cfg.title_position = position;
                 self.state.quick_settings = cfg;
                 let _ = self.worker.cmd_tx.send(WorkerCmd::SetQuickSettings(cfg));
@@ -1877,8 +1922,9 @@ impl App {
                 self.set_history_active(false);
                 if self.tray_rx.is_some() {
                     self.window_hidden = true;
-                    self.advance_window_generation();
-                    self.guard_window_task(hide_window())
+                    let generation = self.advance_window_generation();
+                    let hide = hide_window(generation, self.window_generation.clone());
+                    self.guard_window_task(hide)
                 } else {
                     self.quit()
                 }
@@ -2019,7 +2065,10 @@ impl App {
                 let generation = self.advance_window_generation();
                 quick::apply_quick_opacity(1.0);
                 self.window_hidden = false;
-                self.set_history_active(self.page == Page::History);
+                // Ordinary activation opens history, not the last settings page.
+                // Settings are only entered through an explicit settings action.
+                self.page = Page::History;
+                self.set_history_active(true);
                 self.guard_window_task(activate_window(generation))
             }
             WindowAction::Settings => self.open_settings(),
@@ -2028,11 +2077,12 @@ impl App {
                 if self.quick.is_some() {
                     return self.dismiss_quick(true);
                 }
-                self.advance_window_generation();
+                let generation = self.advance_window_generation();
                 self.cancel_hotkey_recording();
                 self.window_hidden = true;
                 self.set_history_active(false);
-                self.guard_window_task(hide_window())
+                let hide = hide_window(generation, self.window_generation.clone());
+                self.guard_window_task(hide)
             }
             WindowAction::Minimize => {
                 if self.quick.is_some() {

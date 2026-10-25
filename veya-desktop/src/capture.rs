@@ -335,48 +335,39 @@ impl QuickTitlePosition {
     }
 }
 
-/// Quick panel font family. `Default` keeps the CJK-capable UI font; `Mono` uses Consolas,
-/// which has no Han glyphs so it only suits ASCII snippets (codes, tokens).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum QuickFontFamily {
-    #[default]
-    Default,
-    Mono,
-}
+/// Quick panel system font family. Persisted names are validated against the loaded CJK database.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct QuickFontFamily(String);
 
 impl QuickFontFamily {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Default => "默认",
-            Self::Mono => "等宽",
-        }
+    pub fn label(&self) -> &str {
+        if self.0 == "default" { "默认（系统中文字体）" } else { &self.0 }
     }
 
-    pub fn as_key(self) -> &'static str {
-        match self {
-            Self::Default => "default",
-            Self::Mono => "mono",
-        }
+    pub fn as_key(&self) -> &str {
+        &self.0
     }
 
-    pub fn from_key(s: &str) -> Self {
-        match s {
-            "mono" => Self::Mono,
-            _ => Self::Default,
-        }
+    pub fn from_key(value: &str) -> Self {
+        crate::font::resolve_cjk_family(value)
+            .map(|name| Self(name.to_owned()))
+            .unwrap_or_else(|| QuickFontFamily::default())
     }
 
-    /// Resolve to the iced [`Font`] to apply on text widgets.
-    pub fn font(self) -> iced::Font {
-        match self {
-            Self::Default => crate::font::name_font(),
-            Self::Mono => crate::font::mono_font(),
-        }
+    pub fn available() -> Vec<Self> {
+        crate::font::cjk_families()
+            .into_iter()
+            .map(|name| Self(name.to_owned()))
+            .collect()
+    }
+
+    pub fn font(&self) -> iced::Font {
+        crate::font::font_for_cjk_family(&self.0)
     }
 }
 
 /// All settings for the quick paste panel, persisted via `quick_*` keys.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct QuickSettings {
     /// Move the pasted item to the top of the list after a paste.
     pub move_to_top_after_paste: bool,
@@ -411,7 +402,7 @@ impl Default for QuickSettings {
             opacity: 1.0,
             title_position: QuickTitlePosition::default(),
             font_size: Self::DEFAULT_FONT_SIZE,
-            font_family: QuickFontFamily::default(),
+            font_family: QuickFontFamily::from_key("default"),
             hover_expand_enabled: true,
         }
     }
@@ -487,7 +478,7 @@ impl QuickSettings {
                 .unwrap_or(Self::DEFAULT_FONT_SIZE),
             font_family: font_family
                 .map(QuickFontFamily::from_key)
-                .unwrap_or_default(),
+                .unwrap_or_else(|| QuickFontFamily::from_key("default")),
             hover_expand_enabled: hover_expand_enabled.map(|s| s != "0").unwrap_or(true),
         }
     }
