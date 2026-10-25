@@ -869,13 +869,44 @@ impl App {
         .spacing(0)
         .width(Length::Fixed(660.0));
 
-        scrollable(
+        // Quick-positioning navigation chips anchored above the scrollable
+        // content. Each chip snaps the settings scrollable to a calibrated
+        // RelativeOffset so users can jump straight to a section without
+        // manual scrolling. Offsets are tuned against the natural section
+        // heights and slightly biased upward so the section label sits just
+        // below the chip bar with a sliver of prior context.
+        let nav_chips = row![
+            settings_nav_chip("隐私", 0.0),
+            settings_nav_chip("外观", 0.14),
+            settings_nav_chip("窗口", 0.27),
+            settings_nav_chip("快捷面板", 0.35),
+            settings_nav_chip("数据", 0.68),
+            settings_nav_chip("关于", 0.85),
+        ]
+        .spacing(6)
+        .width(Length::Fixed(660.0));
+
+        let settings_scroll: Element<'_, Message> = scrollable(
             container(settings_content)
                 .width(Length::Fill)
                 .align_x(Alignment::Center)
                 .padding(pad(10.0, 0.0, 30.0, 0.0)),
         )
+        .id(scrollable::Id::new("settings-scroll"))
         .style(theme::scroll_style)
+        .height(Length::Fill)
+        .into();
+
+        column![
+            container(nav_chips)
+                .width(Length::Fill)
+                .align_x(Alignment::Center)
+                .padding(pad(10.0, 12.0, 8.0, 12.0)),
+            theme::hdivider(),
+            settings_scroll,
+        ]
+        .spacing(0)
+        .width(Length::Fill)
         .height(Length::Fill)
         .into()
     }
@@ -1041,4 +1072,17 @@ fn limit_row(spec: LimitRow<'_>) -> Element<'_, Message> {
     .spacing(12)
     .align_y(Alignment::Center)
     .into()
+}
+
+/// A compact chip used by the settings quick-positioning navigation bar.
+///
+/// Clicking the chip emits [`Message::ScrollSettingsTo`] carrying a
+/// calibrated relative Y offset (0.0..=1.0); the app's update handler then
+/// snaps the settings scrollable to that [`scrollable::RelativeOffset`].
+fn settings_nav_chip<'a>(label: &'a str, offset_y: f32) -> Element<'a, Message> {
+    button(text(label).size(11).color(theme::MUTED()))
+        .on_press(Message::ScrollSettingsTo(offset_y))
+        .style(theme::action_button)
+        .padding(pad(4.0, 9.0, 4.0, 9.0))
+        .into()
 }

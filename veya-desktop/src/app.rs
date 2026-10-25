@@ -444,6 +444,10 @@ pub enum Message {
     ConfirmClearHistory,
     CancelClearHistory,
     GoPage(Page),
+    /// Snap the settings scrollable to a relative Y offset (0.0..=1.0).
+    /// Emitted by the quick-positioning chips above the settings list so
+    /// users can jump straight to a section without manual scrolling.
+    ScrollSettingsTo(f32),
     ToggleRaw,
     ToggleDetailMenu,
     SetPinned {
@@ -1587,6 +1591,18 @@ impl App {
                 self.unload_full_image();
                 self.set_history_active(p == Page::History && !self.window_hidden);
                 Task::none()
+            }
+            Message::ScrollSettingsTo(y) => {
+                // Snap the settings scrollable to the calibrated relative
+                // offset emitted by the quick-positioning chips. `snap_to`
+                // auto-clamps to [0, content - viewport], so out-of-range
+                // offsets stay safe. The settings page is only rendered when
+                // the quick picker is closed, so we never compete with the
+                // quick-history scroll id.
+                scrollable::snap_to(
+                    scrollable::Id::new("settings-scroll"),
+                    scrollable::RelativeOffset { x: 0.0, y },
+                )
             }
             Message::ToggleRaw => {
                 let next = !self.state.expanded_raw;
