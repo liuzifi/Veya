@@ -420,6 +420,7 @@ pub enum Message {
         restore: bool,
     },
     OpenManager,
+    OpenSettings,
     Tick,
     CursorMoved(iced::Point),
     SearchChanged(String),
@@ -1108,6 +1109,7 @@ impl App {
                 restore,
             } => self.quick_hidden(generation, target, restore),
             Message::OpenManager => self.open_manager(),
+            Message::OpenSettings => self.open_settings(),
             Message::CursorMoved(position) => {
                 self.cursor_position = position;
                 Task::none()

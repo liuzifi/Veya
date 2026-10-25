@@ -261,6 +261,31 @@ impl App {
         Task::batch([query, window])
     }
 
+    /// Transition from the quick panel to the settings page. Like
+    /// [`open_manager`](App::open_manager) it restores the shared window size
+    /// and strips the overlay state, but switches to [`Page::Settings`] and
+    /// skips the history query the settings page does not need.
+    pub(super) fn open_settings(&mut self) -> Task<Message> {
+        if self.quick.as_ref().is_some_and(|quick| quick.sending) {
+            return Task::none();
+        }
+        apply_quick_opacity(1.0);
+        let leave = self.leave_strip_state();
+        let size = self.restore_management_state();
+        let generation = self.advance_window_generation();
+        self.window_hidden = false;
+        self.page = Page::Settings;
+        self.set_history_active(false);
+        let window = leave.chain(iced::window::get_latest().then(move |id| {
+            let resize = match (id, size) {
+                (Some(id), Some(size)) => iced::window::resize(id, size),
+                _ => Task::none(),
+            };
+            resize.chain(activate_window(generation))
+        }));
+        window
+    }
+
     /// Undo what pinning and folding did to the native window (topmost level,
     /// shifted position) before the shared window returns to manager use.
     fn leave_strip_state(&self) -> Task<Message> {
@@ -906,9 +931,9 @@ impl App {
                 .into()
         };
         let footer = row![
-            button(meta("管理历史").size(12))
+            button(meta("设置").size(12))
                 .style(theme::action_button)
-                .on_press(Message::OpenManager),
+                .on_press(Message::OpenSettings),
             Space::with_width(Length::Fill),
             meta("↑ ↓ 选择 · Enter 粘贴 · Ctrl+1…0 快粘 · Esc 关闭").size(11),
         ]
