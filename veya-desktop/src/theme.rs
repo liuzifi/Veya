@@ -106,7 +106,7 @@ pub static LIGHT: Palette = Palette {
     warn: Color::from_rgb(0.60, 0.38, 0.02),
     chip_bg: Color::from_rgb(0.938, 0.946, 0.962),
     light: true,
-    shadow: Color::from_rgba(0.10, 0.14, 0.22, 0.20),
+    shadow: Color::from_rgba(0.10, 0.14, 0.22, 0.08),
     backdrop: Color::from_rgba(0.10, 0.13, 0.20, 0.38),
     overlay: Color::from_rgb(1.0, 1.0, 1.0),
     danger_soft: Color::from_rgb(0.99, 0.91, 0.91),
