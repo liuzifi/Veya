@@ -170,10 +170,10 @@ mod native {
         use windows::Win32::System::Com::{
             CoInitializeEx, CoTaskMemFree, CoUninitialize, COINIT_APARTMENTTHREADED,
         };
+        use windows::Win32::UI::Shell::Common::BIF_USENEWUI;
         use windows::Win32::UI::Shell::{
             SHBrowseForFolderW, SHGetPathFromIDListW, BIF_RETURNONLYFSDIRS, BROWSEINFOW,
         };
-        use windows::Win32::UI::Shell::Common::BIF_USENEWUI;
 
         let title = wide(title);
         let owner_title = wide(owner_title);
