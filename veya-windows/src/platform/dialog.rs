@@ -171,8 +171,8 @@ mod native {
             CoInitializeEx, CoTaskMemFree, CoUninitialize, COINIT_APARTMENTTHREADED,
         };
         use windows::Win32::UI::Shell::{
-            SHBrowseForFolderW, SHGetPathFromIDListW, BIF_RETURNONLYFSDIRS,
-            BIF_USENEWUI, BROWSEINFOW,
+            SHBrowseForFolderW, SHGetPathFromIDListW, BIF_RETURNONLYFSDIRS, BIF_USENEWUI,
+            BROWSEINFOW,
         };
 
         let title = wide(title);

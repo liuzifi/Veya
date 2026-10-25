@@ -181,13 +181,12 @@ pub fn database_path() -> PathBuf {
 /// override from the sidecar config or the default `%APPDATA%/Veya` folder.
 /// The UI shows this read-only so users can tell where their data lives.
 pub fn current_db_dir() -> std::path::PathBuf {
-    crate::config::read_custom_db_dir()
-        .unwrap_or_else(|| {
-            db_path()
-                .parent()
-                .map(std::path::PathBuf::from)
-                .unwrap_or_else(|| std::path::PathBuf::from("."))
-        })
+    crate::config::read_custom_db_dir().unwrap_or_else(|| {
+        db_path()
+            .parent()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+    })
 }
 
 /// The built-in default storage directory, shown beside the input box so the
@@ -1234,15 +1233,17 @@ fn run_worker(
                         let _ = store.set_setting("quick_opacity", &settings.opacity.to_string());
                         let _ = store
                             .set_setting("quick_title_position", settings.title_position.as_key());
-                        let _ = store.set_setting(
-                            "quick_font_size",
-                            &settings.font_size.to_string(),
-                        );
-                        let _ = store
-                            .set_setting("quick_font_family", settings.font_family.as_key());
+                        let _ =
+                            store.set_setting("quick_font_size", &settings.font_size.to_string());
+                        let _ =
+                            store.set_setting("quick_font_family", settings.font_family.as_key());
                         let _ = store.set_setting(
                             "quick_hover_expand_enabled",
-                            if settings.hover_expand_enabled { "1" } else { "0" },
+                            if settings.hover_expand_enabled {
+                                "1"
+                            } else {
+                                "0"
+                            },
                         );
                     }
                     WorkerCmd::RestoreDatabase { path } => {

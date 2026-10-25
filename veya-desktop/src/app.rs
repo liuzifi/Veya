@@ -108,7 +108,8 @@ fn window_taskbar_role(
             if token.load(std::sync::atomic::Ordering::SeqCst) != generation {
                 return;
             }
-            if let iced::window::raw_window_handle::RawWindowHandle::Win32(handle) = handle.as_raw() {
+            if let iced::window::raw_window_handle::RawWindowHandle::Win32(handle) = handle.as_raw()
+            {
                 let _ = veya_windows::platform::window_place::set_window_taskbar_visible(
                     handle.hwnd.get(),
                     visible,
@@ -1288,11 +1289,9 @@ impl App {
                 while let Ok(signal) = self.activation_rx.try_recv() {
                     window_signals.push(signal);
                 }
-                if let Some(action) = resolve_window_signals(
-                    self.window_hidden,
-                    self.quick.is_some(),
-                    window_signals,
-                ) {
+                if let Some(action) =
+                    resolve_window_signals(self.window_hidden, self.quick.is_some(), window_signals)
+                {
                     tasks.push(self.apply_window_action(action));
                 }
                 let snapshot = self.shared.lock().ok().and_then(|guard| {

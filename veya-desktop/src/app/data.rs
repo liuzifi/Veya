@@ -202,9 +202,9 @@ impl App {
             return Task::none();
         }
         self.db_path_input.clear();
-        let _ = self.worker.send(WorkerCmd::SetDbPath {
-            dir: String::new(),
-        });
+        let _ = self
+            .worker
+            .send(WorkerCmd::SetDbPath { dir: String::new() });
         Task::none()
     }
 

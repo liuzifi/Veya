@@ -121,9 +121,9 @@ const DEFAULT_METRICS: QuickMetrics = QuickMetrics {
 /// Nominal panel height at the default font size, used as the window size baseline.
 /// Each row contributes its stride (button height + inter-card gap) so the sized
 /// window holds the same ten rows the renderer lays out.
-const QUICK_HEIGHT: f32 =
-    QUICK_VISIBLE_ROWS as f32 * (DEFAULT_METRICS.row_height + DEFAULT_METRICS.row_gap)
-        + QUICK_CHROME_HEIGHT;
+const QUICK_HEIGHT: f32 = QUICK_VISIBLE_ROWS as f32
+    * (DEFAULT_METRICS.row_height + DEFAULT_METRICS.row_gap)
+    + QUICK_CHROME_HEIGHT;
 const ROW_NUMBER_LABELS: [&str; NUMBERED_ROWS] = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"];
 /// Two presses on the strip closer than this toggle the always-on-top pin.
 const STRIP_DOUBLE_CLICK: std::time::Duration = std::time::Duration::from_millis(400);
@@ -224,8 +224,7 @@ impl App {
             // full size still restores a usable panel instead of staying at strip width.
             let mut strip = Strip::default();
             if strip.expanded_size.width <= 0.0 {
-                strip.expanded_size =
-                    iced::Size::new(QUICK_WIDTH, self.quick_window_height());
+                strip.expanded_size = iced::Size::new(QUICK_WIDTH, self.quick_window_height());
             }
             self.quick = Some(QuickPanel {
                 target,
@@ -2196,8 +2195,10 @@ pub(in crate::app) mod tests {
 
     #[test]
     fn picker_has_room_for_ten_rows_above_the_fixed_chrome() {
-        assert!(QUICK_HEIGHT - QUICK_CHROME_HEIGHT
-            >= QUICK_VISIBLE_ROWS as f32 * DEFAULT_METRICS.row_height);
+        assert!(
+            QUICK_HEIGHT - QUICK_CHROME_HEIGHT
+                >= QUICK_VISIBLE_ROWS as f32 * DEFAULT_METRICS.row_height
+        );
         assert_eq!(QUICK_VISIBLE_ROWS, 10);
     }
 
@@ -2546,10 +2547,7 @@ pub(in crate::app) mod tests {
         // advance_window_generation drained and aborted both old handles
         // before starting the new session, so only the fresh one remains.
         assert_eq!(app.window_tasks.len(), 1);
-        assert!(app
-            .window_tasks
-            .iter()
-            .all(|handle| !handle.is_aborted()));
+        assert!(app.window_tasks.iter().all(|handle| !handle.is_aborted()));
         // The generation advanced twice (dismiss + reopen).
         assert_ne!(
             app.window_generation
@@ -2600,10 +2598,7 @@ pub(in crate::app) mod tests {
         let _ = app.show_quick(None);
         // While the panel is open window_size reflects the narrow panel; the
         // saved ManagementState captured the original manager size.
-        assert_eq!(
-            app.quick.as_ref().unwrap().saved.size,
-            original
-        );
+        assert_eq!(app.quick.as_ref().unwrap().saved.size, original);
         let _ = app.dismiss_quick(true);
         // restore_management_state wrote the saved size back into window_size
         // synchronously, so even before any WindowResized arrives the field

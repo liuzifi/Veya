@@ -278,8 +278,7 @@ pub fn set_window_taskbar_visible(raw_hwnd: isize, visible: bool) -> bool {
         // case use that apartment, and only balance our own successful init.
         let initialized = CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok();
         let shell_result = (|| -> windows::core::Result<()> {
-            let taskbar: ITaskbarList =
-                CoCreateInstance(&TaskbarList, None, CLSCTX_INPROC_SERVER)?;
+            let taskbar: ITaskbarList = CoCreateInstance(&TaskbarList, None, CLSCTX_INPROC_SERVER)?;
             taskbar.HrInit()?;
             if visible && IsWindowVisible(hwnd).as_bool() {
                 taskbar.AddTab(hwnd)

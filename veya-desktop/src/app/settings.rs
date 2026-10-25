@@ -334,13 +334,13 @@ impl App {
                 .style(theme::chip_button(current == want))
                 .padding(pad(6.0, 12.0, 6.0, 12.0))
         };
-        let font_family_chip = |current: crate::capture::QuickFontFamily,
-                                want: crate::capture::QuickFontFamily| {
-            button(text(want.label()).size(12))
-                .on_press(Message::QuickSetFontFamily(want))
-                .style(theme::chip_button(current == want))
-                .padding(pad(6.0, 12.0, 6.0, 12.0))
-        };
+        let font_family_chip =
+            |current: crate::capture::QuickFontFamily, want: crate::capture::QuickFontFamily| {
+                button(text(want.label()).size(12))
+                    .on_press(Message::QuickSetFontFamily(want))
+                    .style(theme::chip_button(current == want))
+                    .padding(pad(6.0, 12.0, 6.0, 12.0))
+            };
 
         let move_top_row = row![
             icons::icon(Icon::Pin, theme::ACCENT(), 18.0),
@@ -577,8 +577,7 @@ impl App {
         .spacing(12)
         .align_y(Alignment::Center);
 
-        let font_size_changed =
-            self.quick_font_size_input != quick.font_size.to_string();
+        let font_size_changed = self.quick_font_size_input != quick.font_size.to_string();
         let font_size_row = row![
             icons::icon(Icon::Text, theme::ACCENT(), 18.0),
             column![
@@ -624,14 +623,8 @@ impl App {
             .spacing(2)
             .width(Length::Fill),
             row![
-                font_family_chip(
-                    quick.font_family,
-                    crate::capture::QuickFontFamily::Default
-                ),
-                font_family_chip(
-                    quick.font_family,
-                    crate::capture::QuickFontFamily::Mono
-                ),
+                font_family_chip(quick.font_family, crate::capture::QuickFontFamily::Default),
+                font_family_chip(quick.font_family, crate::capture::QuickFontFamily::Mono),
             ]
             .spacing(6),
         ]
@@ -745,7 +738,11 @@ impl App {
             let base = button(text(label).size(12))
                 .style(theme::action_button)
                 .padding(pad(7.0, 14.0, 7.0, 14.0));
-            if db_path_locked { base } else { base.on_press(message) }
+            if db_path_locked {
+                base
+            } else {
+                base.on_press(message)
+            }
         };
         let db_path_apply = {
             let base = button(text("应用").size(12))
@@ -785,7 +782,9 @@ impl App {
         let db_path_row = row![
             icons::icon(Icon::External, theme::ACCENT(), 18.0),
             column![
-                body("数据库存储路径").size(13).font(crate::font::name_font()),
+                body("数据库存储路径")
+                    .size(13)
+                    .font(crate::font::name_font()),
                 meta(format!("当前生效：{}", self.db_path_current))
                     .size(11)
                     .color(theme::MUTED()),
