@@ -1496,10 +1496,12 @@ impl App {
                         self.quick_opacity_input = (opacity * 100.0).round().to_string();
                         self.state.quick_settings = cfg;
                         let _ = self.worker.cmd_tx.send(WorkerCmd::SetQuickSettings(cfg));
-                        // A live picker window follows the new opacity immediately.
-                        if self.quick.is_some() {
-                            quick::apply_quick_opacity(opacity);
-                        }
+                        // Apply the new opacity to the shared window immediately so the
+                        // settings page (where `self.quick` is `None`) gives live visual
+                        // feedback. `open_manager`, `open_settings`, and `dismiss_quick`
+                        // reset opacity to 1.0 on their own transitions, so previewing
+                        // here does not leak a translucent state into the manager.
+                        quick::apply_quick_opacity(opacity);
                     }
                     None => {
                         self.state.status_note = format!(
@@ -1572,6 +1574,15 @@ impl App {
             }
             Message::GoPage(p) => {
                 self.cancel_hotkey_recording();
+                // The opacity setting is a quick-panel-only effect; the manager
+                // (History) and the settings page render fully opaque. When the
+                // quick picker is not active, navigating between manager pages
+                // must clear any translucent state previewed in the settings box
+                // so it does not leak onto the manager window. The quick picker
+                // itself owns its opacity via `show_quick` and never uses GoPage.
+                if self.quick.is_none() {
+                    quick::apply_quick_opacity(1.0);
+                }
                 self.page = p;
                 self.unload_full_image();
                 self.set_history_active(p == Page::History && !self.window_hidden);
@@ -1882,6 +1893,9 @@ impl App {
                 if self.quick.is_some() {
                     return self.open_manager();
                 }
+                // Restoring the manager from the tray must not inherit a
+                // translucent state previewed in the settings opacity box.
+                quick::apply_quick_opacity(1.0);
                 self.window_hidden = false;
                 self.set_history_active(self.page == Page::History);
                 let generation = self.advance_window_generation();
