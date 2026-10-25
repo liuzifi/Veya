@@ -734,6 +734,8 @@ impl App {
     fn build_quick_folded(&mut self, folded: bool) -> Task<Message> {
         let window_size = self.window_size;
         let title_position = self.state.quick_settings.title_position;
+        // Needs `&self`, so it is computed before `quick` borrows the panel mutably.
+        let nominal_size = iced::Size::new(QUICK_WIDTH, self.quick_window_height());
         let Some(quick) = &mut self.quick else {
             return Task::none();
         };
@@ -759,8 +761,7 @@ impl App {
                 // The window has not reported the full size yet (or carries a stale strip
                 // size); fall back to the nominal size so unfolding still restores a usable
                 // panel instead of leaving the window at strip width.
-                let height = self.quick_window_height();
-                quick.strip.expanded_size = iced::Size::new(QUICK_WIDTH, height);
+                quick.strip.expanded_size = nominal_size;
             }
             let window_size = quick.strip.expanded_size;
             // Resizing keeps the top-left corner; sides whose strip sits on the
@@ -792,8 +793,7 @@ impl App {
             // already folded, or the fold resize raced the hover), fall back to the nominal
             // size so the panel actually shows its content instead of staying at strip width.
             if quick.strip.expanded_size.width <= 0.0 {
-                let height = self.quick_window_height();
-                quick.strip.expanded_size = iced::Size::new(QUICK_WIDTH, height);
+                quick.strip.expanded_size = nominal_size;
             }
             let size = quick.strip.expanded_size;
             let unfold = match title_position {
@@ -2543,11 +2543,12 @@ pub(in crate::app) mod tests {
             .window_generation
             .load(std::sync::atomic::Ordering::SeqCst);
         let _ = app.dismiss_quick(true);
-        // dismiss_quick pushes another guarded task (hide + resize + role).
-        assert_eq!(app.window_tasks.len(), 2);
+        // dismiss_quick first advances the generation, which aborts the opening's stream so
+        // a late show/resize cannot land after the dismissal, and then registers its own
+        // guarded task (hide + resize + role): exactly one handle, and it is the new one.
+        assert_eq!(app.window_tasks.len(), 1);
         let _ = app.show_quick(None);
-        // advance_window_generation drained and aborted both old handles
-        // before starting the new session, so only the fresh one remains.
+        // Reopening aborts the dismissal's stream the same way and registers a fresh one.
         assert_eq!(app.window_tasks.len(), 1);
         assert!(app.window_tasks.iter().all(|handle| !handle.is_aborted()));
         // The generation advanced twice (dismiss + reopen).
@@ -2596,10 +2597,9 @@ pub(in crate::app) mod tests {
         // the right dimensions.
         let mut app = isolated_app();
         let original = app.window_size;
-        app.window_size = iced::Size::new(QUICK_WIDTH, 320.0);
         let _ = app.show_quick(None);
-        // While the panel is open window_size reflects the narrow panel; the
-        // saved ManagementState captured the original manager size.
+        // Opening captured the manager size; the native window then shrinks to the panel.
+        app.window_size = iced::Size::new(QUICK_WIDTH, 320.0);
         assert_eq!(app.quick.as_ref().unwrap().saved.size, original);
         let _ = app.dismiss_quick(true);
         // restore_management_state wrote the saved size back into window_size
