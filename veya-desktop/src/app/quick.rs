@@ -759,8 +759,8 @@ impl App {
                 // The window has not reported the full size yet (or carries a stale strip
                 // size); fall back to the nominal size so unfolding still restores a usable
                 // panel instead of leaving the window at strip width.
-                quick.strip.expanded_size =
-                    iced::Size::new(QUICK_WIDTH, self.quick_window_height());
+                let height = self.quick_window_height();
+                quick.strip.expanded_size = iced::Size::new(QUICK_WIDTH, height);
             }
             let window_size = quick.strip.expanded_size;
             // Resizing keeps the top-left corner; sides whose strip sits on the
@@ -792,8 +792,8 @@ impl App {
             // already folded, or the fold resize raced the hover), fall back to the nominal
             // size so the panel actually shows its content instead of staying at strip width.
             if quick.strip.expanded_size.width <= 0.0 {
-                quick.strip.expanded_size =
-                    iced::Size::new(QUICK_WIDTH, self.quick_window_height());
+                let height = self.quick_window_height();
+                quick.strip.expanded_size = iced::Size::new(QUICK_WIDTH, height);
             }
             let size = quick.strip.expanded_size;
             let unfold = match title_position {
@@ -2025,6 +2025,8 @@ pub(in crate::app) mod tests {
             quick_lines_input: String::new(),
             quick_opacity_input: String::new(),
             limit_inputs_synced: true,
+            quick_font_size_input: String::new(),
+            quick_settings_owned: false,
             detail_menu_open: false,
             card_menu: None,
             quick_group_sel: None,

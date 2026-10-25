@@ -31,7 +31,7 @@ pub(super) enum DataJob {
 }
 
 impl DataJob {
-    fn locked(&self) -> bool {
+    pub(super) fn locked(&self) -> bool {
         matches!(self, Self::Working(_) | Self::ConfirmRestore { .. })
     }
 }
@@ -191,7 +191,7 @@ impl App {
             return Task::none();
         }
         let dir = self.db_path_input.trim().to_string();
-        let _ = self.worker.send(WorkerCmd::SetDbPath { dir });
+        let _ = self.worker.cmd_tx.send(WorkerCmd::SetDbPath { dir });
         Task::none()
     }
 
@@ -204,6 +204,7 @@ impl App {
         self.db_path_input.clear();
         let _ = self
             .worker
+            .cmd_tx
             .send(WorkerCmd::SetDbPath { dir: String::new() });
         Task::none()
     }
