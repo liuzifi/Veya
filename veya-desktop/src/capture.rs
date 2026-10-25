@@ -335,6 +335,46 @@ impl QuickTitlePosition {
     }
 }
 
+/// Quick panel font family. `Default` keeps the CJK-capable UI font; `Mono` uses Consolas,
+/// which has no Han glyphs so it only suits ASCII snippets (codes, tokens).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum QuickFontFamily {
+    #[default]
+    Default,
+    Mono,
+}
+
+impl QuickFontFamily {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Default => "默认",
+            Self::Mono => "等宽",
+        }
+    }
+
+    pub fn as_key(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::Mono => "mono",
+        }
+    }
+
+    pub fn from_key(s: &str) -> Self {
+        match s {
+            "mono" => Self::Mono,
+            _ => Self::Default,
+        }
+    }
+
+    /// Resolve to the iced [`Font`] to apply on text widgets.
+    pub fn font(self) -> iced::Font {
+        match self {
+            Self::Default => crate::font::name_font(),
+            Self::Mono => crate::font::mono_font(),
+        }
+    }
+}
+
 /// All settings for the quick paste panel, persisted via `quick_*` keys.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct QuickSettings {
@@ -352,6 +392,10 @@ pub struct QuickSettings {
     pub opacity: f32,
     /// Title bar position.
     pub title_position: QuickTitlePosition,
+    /// Body font size for quick panel rows (11–18, default 13).
+    pub font_size: u32,
+    /// Body font family for quick panel rows.
+    pub font_family: QuickFontFamily,
 }
 
 impl Default for QuickSettings {
@@ -364,6 +408,8 @@ impl Default for QuickSettings {
             auto_dismiss: true,
             opacity: 1.0,
             title_position: QuickTitlePosition::default(),
+            font_size: Self::DEFAULT_FONT_SIZE,
+            font_family: QuickFontFamily::default(),
         }
     }
 }
@@ -373,6 +419,9 @@ impl QuickSettings {
     pub const MAX_DISPLAY_LINES: u32 = 10;
     pub const MIN_OPACITY: f32 = 0.1;
     pub const MAX_OPACITY: f32 = 1.0;
+    pub const MIN_FONT_SIZE: u32 = 11;
+    pub const MAX_FONT_SIZE: u32 = 18;
+    pub const DEFAULT_FONT_SIZE: u32 = 13;
 
     /// Parse a user-entered line count. Only a plain integer in the allowed range is valid.
     pub fn parse_display_lines(input: &str) -> Option<u32> {
@@ -392,6 +441,14 @@ impl QuickSettings {
         Some(clamped.max(Self::MIN_OPACITY))
     }
 
+    /// Parse a user-entered font size (11–18).
+    pub fn parse_font_size(input: &str) -> Option<u32> {
+        let value = input.trim().parse::<u32>().ok()?;
+        (Self::MIN_FONT_SIZE..=Self::MAX_FONT_SIZE)
+            .contains(&value)
+            .then_some(value)
+    }
+
     /// Rebuild the setting from its stored values; anything missing falls back to defaults.
     pub fn from_settings(
         move_to_top: Option<&str>,
@@ -401,6 +458,8 @@ impl QuickSettings {
         auto_dismiss: Option<&str>,
         opacity: Option<&str>,
         title_position: Option<&str>,
+        font_size: Option<&str>,
+        font_family: Option<&str>,
     ) -> Self {
         Self {
             move_to_top_after_paste: move_to_top == Some("1"),
@@ -418,6 +477,12 @@ impl QuickSettings {
                 .unwrap_or(1.0),
             title_position: title_position
                 .map(QuickTitlePosition::from_key)
+                .unwrap_or_default(),
+            font_size: font_size
+                .and_then(Self::parse_font_size)
+                .unwrap_or(Self::DEFAULT_FONT_SIZE),
+            font_family: font_family
+                .map(QuickFontFamily::from_key)
                 .unwrap_or_default(),
         }
     }

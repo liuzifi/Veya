@@ -7,13 +7,9 @@ use iced::widget::column;
 const QUICK_WIDTH: f32 = 440.0;
 /// History rows that are fully visible when the picker opens (on a screen tall enough).
 const QUICK_VISIBLE_ROWS: usize = 10;
-const ROW_HEIGHT: f32 = 52.0;
 /// Everything in the picker except the list: header, search box, group tabs, dividers,
 /// footer and padding. Slightly generous, so ten full rows fit even with larger fonts.
 const QUICK_CHROME_HEIGHT: f32 = 204.0;
-/// Extra height each additional preview line adds to a quick row.
-const QUICK_EXTRA_LINE_HEIGHT: f32 = 20.0;
-const QUICK_HEIGHT: f32 = QUICK_VISIBLE_ROWS as f32 * ROW_HEIGHT + QUICK_CHROME_HEIGHT;
 const QUICK_MENU_WIDTH: f32 = 200.0;
 const QUICK_MENU_ITEM_HEIGHT: f32 = 34.0;
 /// Rows from the end of the loaded list at which keyboard navigation loads the next page.
@@ -23,9 +19,88 @@ const LOAD_MORE_LOOKAHEAD: usize = 5;
 const STRIP_WIDTH: f32 = 28.0;
 /// The first rows are numbered 1-9 then 0, matching Ctrl+digit.
 const NUMBERED_ROWS: usize = 10;
+
+/// Per-row layout metrics derived from the configured `font_size`. The default font size
+/// is 13, which yields a tighter layout than the old hardcoded 52 px rows: smaller number
+/// column, smaller leading icon and reduced padding. Larger sizes scale everything up so
+/// the panel stays readable without the rows feeling cramped.
+struct QuickMetrics {
+    /// Body text size in px (same as the configured `font_size`).
+    body: f32,
+    /// Metadata text size (source/time) — two points below body, clamped to >= 9.
+    meta: f32,
+    /// Row height for a single-line card.
+    row_height: f32,
+    /// Extra height per additional preview line.
+    extra_line_height: f32,
+    /// Width of the 0–9 number column.
+    number_column_width: f32,
+    /// Side used-marker bar width.
+    used_marker_width: f32,
+    /// Size of the leading visual (image / type chip) box.
+    leading_size: f32,
+    /// Horizontal spacing between elements inside a row.
+    row_spacing: f32,
+    /// Inner padding of the row button.
+    row_padding: f32,
+    /// Vertical spacing between body and metadata inside a row.
+    inner_spacing: f32,
+}
+
+impl QuickMetrics {
+    fn from_font_size(font_size: u32) -> Self {
+        let body = font_size as f32;
+        let scale = body / 13.0;
+        let meta = (body - 2.0).max(9.0);
+        // Default 13 → row 44 px (was 52); scales with font size so 18 → ~61 px.
+        let row_height = (44.0 * scale).max(body + 18.0);
+        let extra_line_height = (16.0 * scale).max(12.0);
+        // Default 13 → 18 px column (was 22); keeps the keycap readable.
+        let number_column_width = (18.0 * scale).max(16.0);
+        let used_marker_width = 3.0;
+        // Default 13 → 24 px icon (was 32); scales gently.
+        let leading_size = (24.0 * scale).max(20.0);
+        let row_spacing = (8.0 * scale).max(6.0);
+        let row_padding = (6.0 * scale).max(4.0);
+        let inner_spacing = (3.0 * scale).max(2.0);
+        Self {
+            body,
+            meta,
+            row_height,
+            extra_line_height,
+            number_column_width,
+            used_marker_width,
+            leading_size,
+            row_spacing,
+            row_padding,
+            inner_spacing,
+        }
+    }
+
+    /// Row height for the configured number of preview lines.
+    fn row_height_with_lines(&self, lines: u32) -> f32 {
+        self.row_height + lines.saturating_sub(1) as f32 * self.extra_line_height
+    }
+}
+
+/// Metrics at the default font size, used by tests and as the panel's nominal height.
+const DEFAULT_METRICS: QuickMetrics = QuickMetrics {
+    body: 13.0,
+    meta: 11.0,
+    row_height: 44.0,
+    extra_line_height: 16.0,
+    number_column_width: 18.0,
+    used_marker_width: 3.0,
+    leading_size: 24.0,
+    row_spacing: 8.0,
+    row_padding: 6.0,
+    inner_spacing: 3.0,
+};
+
+/// Nominal panel height at the default font size, used as the window size baseline.
+const QUICK_HEIGHT: f32 =
+    QUICK_VISIBLE_ROWS as f32 * DEFAULT_METRICS.row_height + QUICK_CHROME_HEIGHT;
 const ROW_NUMBER_LABELS: [&str; NUMBERED_ROWS] = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"];
-const NUMBER_COLUMN_WIDTH: f32 = 22.0;
-const USED_MARKER_WIDTH: f32 = 3.0;
 /// Two presses on the strip closer than this toggle the always-on-top pin.
 const STRIP_DOUBLE_CLICK: std::time::Duration = std::time::Duration::from_millis(400);
 
@@ -760,7 +835,10 @@ impl App {
             self.request_history_load_more();
         }
         // Each row has a fixed height; keep the keyboard selection in view.
-        let row_height = quick_row_height(self.state.quick_settings.display_lines);
+        let row_height = quick_row_height(
+            self.state.quick_settings.display_lines,
+            self.state.quick_settings.font_size,
+        );
         let viewport =
             (self.window_size.height - QUICK_CHROME_HEIGHT - self.quick_strip_extra_height())
                 .max(row_height);
@@ -793,7 +871,9 @@ impl App {
         if lines <= 1 {
             QUICK_HEIGHT + extra
         } else {
-            QUICK_VISIBLE_ROWS as f32 * quick_row_height(lines) + QUICK_CHROME_HEIGHT + extra
+            QUICK_VISIBLE_ROWS as f32 * quick_row_height(lines, self.state.quick_settings.font_size)
+                + QUICK_CHROME_HEIGHT
+                + extra
         }
     }
 
@@ -804,7 +884,9 @@ impl App {
         let busy = quick.busy();
         let pending = self.history_list_pending();
         let lines = self.state.quick_settings.display_lines.max(1);
-        let row_height = quick_row_height(lines);
+        let metrics = QuickMetrics::from_font_size(self.state.quick_settings.font_size);
+        let font = self.state.quick_settings.font_family.font();
+        let row_height = metrics.row_height_with_lines(lines);
         let search: Element<'_, Message> = if let Some(input) = &self.quick_group_input {
             let field = text_input("输入分组名称…", &input.value)
                 .id(group_input_id())
@@ -851,7 +933,7 @@ impl App {
                     } else {
                         "没有匹配结果，试试其他关键词"
                     })
-                    .size(13),
+                    .size(metrics.body),
                 ]
                 .spacing(12)
                 .align_x(Alignment::Center),
@@ -869,47 +951,54 @@ impl App {
                     }
                     veya_core::SourceConfidence::Unknown => "来源未知".into(),
                 };
-                let mut metadata =
-                    row![meta(source).size(11), meta(card.relative_time()).size(11)].spacing(8);
+                let mut metadata = row![
+                    meta(source).size(metrics.meta),
+                    meta(card.relative_time()).size(metrics.meta),
+                ]
+                .spacing(metrics.row_spacing);
                 if card.pinned {
-                    metadata = metadata.push(icons::icon(Icon::Pin, theme::ACCENT(), 11.0));
+                    metadata = metadata.push(icons::icon(Icon::Pin, theme::ACCENT(), metrics.meta));
                 }
                 let number: Element<'_, Message> = match ROW_NUMBER_LABELS.get(index) {
-                    Some(label) => container(theme::keycap(label))
-                        .width(Length::Fixed(NUMBER_COLUMN_WIDTH))
-                        .center_x(Length::Fixed(NUMBER_COLUMN_WIDTH))
+                    Some(label) => container(theme::keycap(label, metrics.meta))
+                        .width(Length::Fixed(metrics.number_column_width))
+                        .center_x(Length::Fixed(metrics.number_column_width))
                         .into(),
-                    None => Space::with_width(Length::Fixed(NUMBER_COLUMN_WIDTH)).into(),
+                    None => Space::with_width(Length::Fixed(metrics.number_column_width)).into(),
                 };
                 // A red bar at the left edge marks a row that was already pasted. Rows without
                 // one keep an empty slot so the columns line up.
                 let used_marker: Element<'_, Message> = if card.has_paste_activity {
-                    container(Space::new(Length::Fixed(USED_MARKER_WIDTH), Length::Fill))
-                        .style(theme::used_marker_style)
-                        .into()
+                    container(Space::new(
+                        Length::Fixed(metrics.used_marker_width),
+                        Length::Fill,
+                    ))
+                    .style(theme::used_marker_style)
+                    .into()
                 } else {
-                    Space::with_width(Length::Fixed(USED_MARKER_WIDTH)).into()
+                    Space::with_width(Length::Fixed(metrics.used_marker_width)).into()
                 };
                 let content = row![
                     used_marker,
                     number,
-                    history::card_leading_visual(card, 32.0),
+                    history::card_leading_visual(card, metrics.leading_size),
                     column![
                         body(quick_preview_lines(&card.content_preview, lines))
-                            .size(13)
+                            .size(metrics.body)
+                            .font(font)
                             .shaping(text::Shaping::Advanced),
                         metadata
                     ]
-                    .spacing(3)
+                    .spacing(metrics.inner_spacing)
                     .width(Length::Fill),
                 ]
-                .spacing(8)
+                .spacing(metrics.row_spacing)
                 .height(Length::Fill)
                 .align_y(Alignment::Center);
                 let row = button(content)
                     .width(Length::Fill)
                     .height(row_height)
-                    .padding(8)
+                    .padding(metrics.row_padding)
                     .style(theme::card_button_quick(
                         self.state.selected == Some(card.sequence),
                         index % 2 == 1,
@@ -931,13 +1020,15 @@ impl App {
                 .into()
         };
         let footer = row![
-            button(meta("设置").size(12))
+            button(meta("设置").size(metrics.meta + 1.0).font(font))
                 .style(theme::action_button)
                 .on_press(Message::OpenSettings),
             Space::with_width(Length::Fill),
-            meta("↑ ↓ 选择 · Enter 粘贴 · Ctrl+1…0 快粘 · Esc 关闭").size(11),
+            meta("↑ ↓ 选择 · Enter 粘贴 · Ctrl+1…0 快粘 · Esc 关闭")
+                .size(metrics.meta)
+                .font(font),
         ]
-        .spacing(4)
+        .spacing(metrics.row_spacing)
         .align_y(Alignment::Center);
         let mut layout = column![
             search,
@@ -1643,9 +1734,9 @@ fn shift_window_y(dy: f32) -> Task<Message> {
     })
 }
 
-/// Row height for the configured number of preview lines per card.
-fn quick_row_height(lines: u32) -> f32 {
-    ROW_HEIGHT + lines.saturating_sub(1) as f32 * QUICK_EXTRA_LINE_HEIGHT
+/// Row height for the configured number of preview lines per card, at the given font size.
+fn quick_row_height(lines: u32, font_size: u32) -> f32 {
+    QuickMetrics::from_font_size(font_size).row_height_with_lines(lines)
 }
 
 /// Preview text clipped to `lines` lines, each line bounded like the single
@@ -2000,7 +2091,8 @@ pub(in crate::app) mod tests {
 
     #[test]
     fn picker_has_room_for_ten_rows_above_the_fixed_chrome() {
-        assert!(QUICK_HEIGHT - QUICK_CHROME_HEIGHT >= QUICK_VISIBLE_ROWS as f32 * ROW_HEIGHT);
+        assert!(QUICK_HEIGHT - QUICK_CHROME_HEIGHT
+            >= QUICK_VISIBLE_ROWS as f32 * DEFAULT_METRICS.row_height);
         assert_eq!(QUICK_VISIBLE_ROWS, 10);
     }
 

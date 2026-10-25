@@ -273,6 +273,8 @@ pub struct App {
     quick_lines_input: String,
     /// Draft text for the quick panel opacity box (percent).
     quick_opacity_input: String,
+    /// Draft text for the quick panel font-size box (px).
+    quick_font_size_input: String,
     /// The number boxes take their first value from the saved settings loaded by the worker.
     limit_inputs_synced: bool,
     detail_menu_open: bool,
@@ -485,6 +487,9 @@ pub enum Message {
     QuickToggleAutoDismiss(bool),
     QuickOpacityInput(String),
     QuickApplyOpacity,
+    QuickFontSizeInput(String),
+    QuickApplyFontSize,
+    QuickSetFontFamily(crate::capture::QuickFontFamily),
     QuickSetTitlePos(crate::capture::QuickTitlePosition),
     StartHotkeyRecord,
     CancelHotkeyRecord,
@@ -520,6 +525,7 @@ impl App {
         let expiry_days_input = state.expiry.days.to_string();
         let quick_lines_input = state.quick_settings.display_lines.to_string();
         let quick_opacity_input = (state.quick_settings.opacity * 100.0).round().to_string();
+        let quick_font_size_input = state.quick_settings.font_size.to_string();
         crate::theme::set_palette(match state.theme_mode {
             ThemeMode::Dark => &crate::theme::DARK,
             ThemeMode::Light => &crate::theme::LIGHT,
@@ -553,6 +559,7 @@ impl App {
                 expiry_days_input,
                 quick_lines_input,
                 quick_opacity_input,
+                quick_font_size_input,
                 limit_inputs_synced: false,
                 detail_menu_open: false,
                 card_menu: None,
@@ -1207,6 +1214,7 @@ impl App {
                         self.quick_lines_input = next.quick_settings.display_lines.to_string();
                         self.quick_opacity_input =
                             (next.quick_settings.opacity * 100.0).round().to_string();
+                        self.quick_font_size_input = next.quick_settings.font_size.to_string();
                     }
                     self.state = next;
                 }
@@ -1494,6 +1502,38 @@ impl App {
                             .to_string();
                     }
                 }
+                Task::none()
+            }
+            Message::QuickFontSizeInput(value) => {
+                self.quick_font_size_input = digits_only(&value, 2);
+                Task::none()
+            }
+            Message::QuickApplyFontSize => {
+                match QuickSettings::parse_font_size(&self.quick_font_size_input) {
+                    Some(size) => {
+                        let mut cfg = self.state.quick_settings;
+                        cfg.font_size = size;
+                        self.quick_font_size_input = size.to_string();
+                        self.state.quick_settings = cfg;
+                        let _ = self.worker.cmd_tx.send(WorkerCmd::SetQuickSettings(cfg));
+                    }
+                    None => {
+                        self.state.status_note = format!(
+                            "文字大小需为 {}–{} 之间的整数（px）",
+                            QuickSettings::MIN_FONT_SIZE,
+                            QuickSettings::MAX_FONT_SIZE
+                        );
+                        self.quick_font_size_input =
+                            self.state.quick_settings.font_size.to_string();
+                    }
+                }
+                Task::none()
+            }
+            Message::QuickSetFontFamily(family) => {
+                let mut cfg = self.state.quick_settings;
+                cfg.font_family = family;
+                self.state.quick_settings = cfg;
+                let _ = self.worker.cmd_tx.send(WorkerCmd::SetQuickSettings(cfg));
                 Task::none()
             }
             Message::QuickSetTitlePos(position) => {
@@ -2110,8 +2150,8 @@ impl App {
                     row![
                         icons::icon(Icon::Search, theme::MUTED(), 16.0),
                         search_input,
-                        theme::keycap("Ctrl"),
-                        theme::keycap("K"),
+                        theme::keycap("Ctrl", 11.0),
+                        theme::keycap("K", 11.0),
                     ]
                     .spacing(6)
                     .align_y(Alignment::Center),

@@ -1006,20 +1006,21 @@ where
         })
 }
 
-/// Small keycap (Ctrl / K).
+/// Small keycap (Ctrl / K), rendered at the supplied size.
 pub fn keycap<'a, Message>(
     label: &'a str,
+    size: f32,
 ) -> container::Container<'a, Message, Theme, iced::Renderer>
 where
     Message: 'a,
 {
     container(
         text(label)
-            .size(11)
+            .size(size)
             .color(MUTED())
             .font(crate::font::name_font()),
     )
-    .padding(pad(3.0, 7.0, 3.0, 7.0))
+    .padding(pad(2.5, 6.0, 2.5, 6.0))
     .style(|_t: &Theme| container::Style {
         background: Some(bg(ELEVATED())),
         text_color: Some(MUTED()),

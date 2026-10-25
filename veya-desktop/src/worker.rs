@@ -212,6 +212,8 @@ fn load_quick_settings(store: &Store) -> QuickSettings {
         setting("quick_auto_dismiss").as_deref(),
         setting("quick_opacity").as_deref(),
         setting("quick_title_position").as_deref(),
+        setting("quick_font_size").as_deref(),
+        setting("quick_font_family").as_deref(),
     )
 }
 
@@ -1203,6 +1205,12 @@ fn run_worker(
                         let _ = store.set_setting("quick_opacity", &settings.opacity.to_string());
                         let _ = store
                             .set_setting("quick_title_position", settings.title_position.as_key());
+                        let _ = store.set_setting(
+                            "quick_font_size",
+                            &settings.font_size.to_string(),
+                        );
+                        let _ = store
+                            .set_setting("quick_font_family", settings.font_family.as_key());
                     }
                     WorkerCmd::RestoreDatabase { path } => {
                         let result = restore_database(

@@ -334,6 +334,13 @@ impl App {
                 .style(theme::chip_button(current == want))
                 .padding(pad(6.0, 12.0, 6.0, 12.0))
         };
+        let font_family_chip = |current: crate::capture::QuickFontFamily,
+                                want: crate::capture::QuickFontFamily| {
+            button(text(want.label()).size(12))
+                .on_press(Message::QuickSetFontFamily(want))
+                .style(theme::chip_button(current == want))
+                .padding(pad(6.0, 12.0, 6.0, 12.0))
+        };
 
         let move_top_row = row![
             icons::icon(Icon::Pin, theme::ACCENT(), 18.0),
@@ -543,6 +550,67 @@ impl App {
         .spacing(12)
         .align_y(Alignment::Center);
 
+        let font_size_changed =
+            self.quick_font_size_input != quick.font_size.to_string();
+        let font_size_row = row![
+            icons::icon(Icon::Text, theme::ACCENT(), 18.0),
+            column![
+                body("文字大小").size(13).font(crate::font::name_font()),
+                meta(format!(
+                    "快捷面板正文字号（{}–{} px），调整后序号/图标/间距同步缩放",
+                    crate::capture::QuickSettings::MIN_FONT_SIZE,
+                    crate::capture::QuickSettings::MAX_FONT_SIZE
+                ))
+                .size(11)
+                .color(theme::MUTED()),
+            ]
+            .spacing(2)
+            .width(Length::Fill),
+            text_input("13", &self.quick_font_size_input)
+                .on_input(Message::QuickFontSizeInput)
+                .on_submit(Message::QuickApplyFontSize)
+                .padding(pad(6.0, 10.0, 6.0, 10.0))
+                .size(12)
+                .style(theme::field_style)
+                .width(Length::Fixed(84.0)),
+            text("px").size(12).color(theme::MUTED()),
+            button(text("应用").size(12))
+                .on_press_maybe(font_size_changed.then_some(Message::QuickApplyFontSize))
+                .style(if font_size_changed {
+                    theme::primary_button
+                } else {
+                    theme::action_button
+                })
+                .padding(pad(6.0, 12.0, 6.0, 12.0)),
+        ]
+        .spacing(12)
+        .align_y(Alignment::Center);
+
+        let font_family_row = row![
+            icons::icon(Icon::Code, theme::ACCENT(), 18.0),
+            column![
+                body("字体").size(13).font(crate::font::name_font()),
+                meta("快捷面板正文字体；“等宽”仅适合英文/数字内容")
+                    .size(11)
+                    .color(theme::MUTED()),
+            ]
+            .spacing(2)
+            .width(Length::Fill),
+            row![
+                font_family_chip(
+                    quick.font_family,
+                    crate::capture::QuickFontFamily::Default
+                ),
+                font_family_chip(
+                    quick.font_family,
+                    crate::capture::QuickFontFamily::Mono
+                ),
+            ]
+            .spacing(6),
+        ]
+        .spacing(12)
+        .align_y(Alignment::Center);
+
         let group_quick = container(
             column![
                 move_top_row,
@@ -566,6 +634,14 @@ impl App {
                 theme::hdivider(),
                 Space::with_height(12.0),
                 opacity_row,
+                Space::with_height(12.0),
+                theme::hdivider(),
+                Space::with_height(12.0),
+                font_size_row,
+                Space::with_height(12.0),
+                theme::hdivider(),
+                Space::with_height(12.0),
+                font_family_row,
                 Space::with_height(12.0),
                 theme::hdivider(),
                 Space::with_height(12.0),
