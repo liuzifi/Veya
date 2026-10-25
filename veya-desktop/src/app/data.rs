@@ -177,6 +177,9 @@ impl App {
                 self.requested_content = None;
                 // Settings (limits, theme) were reloaded by the worker; refresh the drafts.
                 self.limit_inputs_synced = false;
+                // The worker reloaded `quick_settings` from the restored database; let the
+                // next snapshot overwrite the UI-owned copy so toggles reflect the backup.
+                self.quick_settings_owned = false;
                 self.request_history_query(false)
             }
             Err(error) => {

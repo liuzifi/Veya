@@ -277,6 +277,14 @@ pub struct App {
     quick_font_size_input: String,
     /// The number boxes take their first value from the saved settings loaded by the worker.
     limit_inputs_synced: bool,
+    /// Once `true`, the quick-panel settings (`quick_settings`) are owned by the UI:
+    /// every `QuickToggle*`/`QuickSet*`/`QuickApply*` handler updates the local copy and
+    /// sends `WorkerCmd::SetQuickSettings`, so the UI value is always the user's latest
+    /// intent. Snapshot overwrites from the worker would race the in-flight command and
+    /// roll a toggle back to its previous value; this flag suppresses that overwrite.
+    /// Reset to `false` on startup and after a database restore so the worker's reloaded
+    /// settings can flow back into the UI.
+    quick_settings_owned: bool,
     detail_menu_open: bool,
     card_menu: Option<CardMenu>,
     quick_group_sel: Option<i64>,
@@ -567,6 +575,7 @@ impl App {
                 quick_opacity_input,
                 quick_font_size_input,
                 limit_inputs_synced: false,
+                quick_settings_owned: false,
                 detail_menu_open: false,
                 card_menu: None,
                 quick_group_sel: None,
@@ -1228,6 +1237,20 @@ impl App {
                         self.quick_opacity_input =
                             (next.quick_settings.opacity * 100.0).round().to_string();
                         self.quick_font_size_input = next.quick_settings.font_size.to_string();
+                    }
+                    // The quick-panel toggles (always-on-top, auto-dismiss, hover-expand,
+                    // move-to-top, …) update `self.state.quick_settings` synchronously in
+                    // their handlers and then send `WorkerCmd::SetQuickSettings`. Until the
+                    // worker processes that command its periodic snapshot still carries the
+                    // previous value, which would race the UI and roll a freshly toggled
+                    // switch back. Once the first snapshot arrives we mark the settings as
+                    // UI-owned; from then on the worker's copy is only accepted on a fresh
+                    // reload (startup, database restore) when `quick_settings_owned` is
+                    // reset to `false`.
+                    if !self.quick_settings_owned {
+                        self.quick_settings_owned = true;
+                    } else {
+                        next.quick_settings = self.state.quick_settings;
                     }
                     self.state = next;
                 }
