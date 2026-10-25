@@ -318,25 +318,28 @@ const DEFAULT_WHEEL_LINES: f32 = 3.0;
 #[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
 const WHEEL_PAGESCROLL_LINES: u32 = u32::MAX;
 
-/// Pixels used when the user selects "scroll one screen at a time". This is a heuristic
-/// that approximates one viewport height; the scrollable clamps to its real bounds.
-#[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
-const PAGE_SCROLL_PX: f32 = 600.0;
-
 /// Turns one raw wheel delta into the scroll the user configured in Windows.
 ///
 /// winit sends `LineDelta(0.0, ±1.0)` per notch without consulting the system setting.
 /// iced scrolls 60 px per unit, which is exactly right for the Windows default of three
 /// lines, so the setting scales that by `lines / 3`: 3 stays as it was, 1 scrolls a third
 /// of it, 10 scrolls three and a third times as far. (Multiplying by `lines` itself would
-/// make the default three times faster than before.) "One screen at a time" becomes a
-/// pixel delta of about a viewport. A setting of 0 is treated as 1.
+/// make the default three times faster than before.) When the user selects "scroll one
+/// screen at a time" (`WHEEL_PAGESCROLL`), we deliberately *don't* honor the full-screen
+/// jump: a ~600 px hop per notch is jarring in compact surfaces such as the quick paste
+/// panel and throws the list well past the content, so we collapse that mode to the same
+/// three-line default and each notch only advances a couple of rows. A setting of 0 is
+/// treated as 1.
 #[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
 fn wheel_scroll_delta(lines: u32, x: f32, y: f32) -> mouse::ScrollDelta {
     if lines == WHEEL_PAGESCROLL_LINES {
-        mouse::ScrollDelta::Pixels {
-            x: x * PAGE_SCROLL_PX,
-            y: y * PAGE_SCROLL_PX,
+        // "Scroll one screen at a time" is honored by most apps as a full-viewport jump,
+        // but in our compact surfaces that overshoots the list. Fall back to the line-based
+        // default so each notch advances a couple of rows instead.
+        let factor = 1.0_f32;
+        mouse::ScrollDelta::Lines {
+            x: x * factor,
+            y: y * factor,
         }
     } else {
         let factor = lines.max(1) as f32 / DEFAULT_WHEEL_LINES;
@@ -1248,10 +1251,13 @@ mod wheel_tests {
     }
 
     #[test]
-    fn page_scroll_becomes_a_pixel_delta() {
-        match wheel_scroll_delta(u32::MAX, 0.0, -1.0) {
-            mouse::ScrollDelta::Pixels { x, y } => assert_eq!((x, y), (0.0, -PAGE_SCROLL_PX)),
-            mouse::ScrollDelta::Lines { .. } => panic!("expected pixels"),
-        }
+    fn page_scroll_falls_back_to_a_line_delta() {
+        // "Scroll one screen at a time" must not jump a full viewport; in compact surfaces
+        // such as the quick paste panel that overshoots. We collapse it to the default
+        // three-line delta (factor 1.0) so each notch only advances a couple of rows.
+        assert_eq!(
+            lines(wheel_scroll_delta(u32::MAX, 0.0, -1.0)),
+            (0.0, -1.0)
+        );
     }
 }
