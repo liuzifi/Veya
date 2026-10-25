@@ -120,6 +120,12 @@ pub enum WorkerCmd {
     SetExpandedRaw(bool),
     SetHotkey(Hotkey),
     SetQuickSettings(crate::capture::QuickSettings),
+    /// Persist a custom database storage directory to the sidecar config file.
+    /// The change takes effect on the next launch (the live store stays open
+    /// on the old path); an empty string clears the override.
+    SetDbPath {
+        dir: String,
+    },
     QueryHistory(HistoryQuery),
     SetHistoryActive(bool),
     LoadFullImage(u32),
@@ -159,16 +165,38 @@ pub fn spawn_worker(shared: SharedUi, activate_tx: Sender<WindowSignal>) -> Work
 }
 
 fn db_path() -> std::path::PathBuf {
-    std::env::var_os("APPDATA")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("Veya")
-        .join("veya.db")
+    // Honour the user's custom storage directory recorded in the sidecar
+    // config file (see `crate::config`). When no override is set the resolver
+    // falls back to `%APPDATA%/Veya/veya.db`, so existing installs keep working
+    // without migration.
+    crate::config::resolve_db_path()
 }
 
 /// Location of the live database, for backups made outside the worker.
 pub fn database_path() -> PathBuf {
     db_path()
+}
+
+/// The directory currently used to store the database — either the custom
+/// override from the sidecar config or the default `%APPDATA%/Veya` folder.
+/// The UI shows this read-only so users can tell where their data lives.
+pub fn current_db_dir() -> std::path::PathBuf {
+    crate::config::read_custom_db_dir()
+        .unwrap_or_else(|| {
+            db_path()
+                .parent()
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| std::path::PathBuf::from("."))
+        })
+}
+
+/// The built-in default storage directory, shown beside the input box so the
+/// user can see what an empty override falls back to.
+pub fn default_db_dir() -> std::path::PathBuf {
+    crate::config::default_db_path()
+        .parent()
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
 }
 
 /// Automatic copies made before a restore are kept in a `backups` folder beside the
@@ -1242,6 +1270,24 @@ fn run_worker(
                             Err(error) => status_note = format!("还原失败：{error}"),
                         }
                         let _ = event_tx.send(WorkerEvent::DatabaseRestored(result));
+                    }
+                    WorkerCmd::SetDbPath { dir } => {
+                        // Persist the override to the sidecar config so the next
+                        // launch opens the database from the new location. The
+                        // live store stays on the old path; the UI tells the
+                        // user to restart for the change to take effect.
+                        match crate::config::write_custom_db_dir(&dir) {
+                            Ok(()) => {
+                                status_note = if dir.trim().is_empty() {
+                                    "数据库路径已恢复默认，重启后生效".to_string()
+                                } else {
+                                    "数据库路径已更新，重启 Veya 后生效".to_string()
+                                };
+                            }
+                            Err(error) => {
+                                status_note = format!("保存数据库路径失败：{error}");
+                            }
+                        }
                     }
                     WorkerCmd::SetThemeMode(mode) => {
                         theme_mode = mode;

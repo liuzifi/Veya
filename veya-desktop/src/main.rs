@@ -3,6 +3,7 @@
 
 mod app;
 mod capture;
+mod config;
 mod font;
 mod format;
 mod icons;

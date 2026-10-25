@@ -33,6 +33,14 @@ pub fn pick_open_file(title: &str, owner_title: &str) -> Option<PathBuf> {
     native::run_dialog(false, title, "", owner_title)
 }
 
+/// Ask the user to pick an existing folder (the database storage directory).
+/// `owner_title` is the title of the window the dialog belongs to. Returns
+/// `None` when the user cancels or the dialog cannot open.
+#[cfg(windows)]
+pub fn pick_folder(title: &str, owner_title: &str) -> Option<PathBuf> {
+    native::browse_for_folder(title, owner_title)
+}
+
 #[cfg(not(windows))]
 pub fn pick_save_file(_title: &str, _default_name: &str, _owner_title: &str) -> Option<PathBuf> {
     None
@@ -40,6 +48,11 @@ pub fn pick_save_file(_title: &str, _default_name: &str, _owner_title: &str) -> 
 
 #[cfg(not(windows))]
 pub fn pick_open_file(_title: &str, _owner_title: &str) -> Option<PathBuf> {
+    None
+}
+
+#[cfg(not(windows))]
+pub fn pick_folder(_title: &str, _owner_title: &str) -> Option<PathBuf> {
     None
 }
 
@@ -140,6 +153,71 @@ mod native {
             .position(|unit| *unit == 0)
             .unwrap_or(file.len());
         (length > 0).then(|| PathBuf::from(OsString::from_wide(&file[..length])))
+    }
+
+    /// Folder picker backed by `SHBrowseForFolderW`. The legacy dialog is used
+    /// because it is available on every supported Windows version (including
+    /// Win7 without SP1) and matches the look-and-feel of the file pickers
+    /// above. `title` is shown above the tree as the banner text; `owner_title`
+    /// locates the owning window so the dialog is properly modal.
+    ///
+    /// `pidlRoot` is left null so browsing starts at the desktop. The calling
+    /// thread runs on a plain OS thread (see `veya-desktop`'s `run_blocking`), so
+    /// it initializes a COM apartment itself — `BIF_USENEWUI` requires one. The
+    /// returned PIDL is a raw pointer freed with `CoTaskMemFree`; our apartment
+    /// (when we created it) is released on every exit path.
+    pub fn browse_for_folder(title: &str, owner_title: &str) -> Option<PathBuf> {
+        use windows::Win32::System::Com::{
+            CoInitializeEx, CoTaskMemFree, CoUninitialize, COINIT_APARTMENTTHREADED,
+        };
+        use windows::Win32::UI::Shell::{
+            SHBrowseForFolderW, SHGetPathFromIDListW, BIF_RETURNONLYFSDIRS,
+            BIF_USENEWUI, BROWSEINFOW,
+        };
+
+        let title = wide(title);
+        let owner_title = wide(owner_title);
+        let owner = unsafe { FindWindowW(PCWSTR::null(), PCWSTR(owner_title.as_ptr())) }
+            .unwrap_or_default();
+
+        let com = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+
+        let info = BROWSEINFOW {
+            hwndOwner: owner,
+            pidlRoot: std::ptr::null_mut(),
+            pszDisplayName: PWSTR::null(),
+            lpszTitle: PCWSTR(title.as_ptr()),
+            ulFlags: BIF_RETURNONLYFSDIRS | BIF_USENEWUI,
+            lpfn: None,
+            lParam: windows::Win32::Foundation::LPARAM(0),
+            iImage: 0,
+        };
+
+        let pidl = unsafe { SHBrowseForFolderW(&info) };
+        let picked = if pidl.is_null() {
+            None
+        } else {
+            // `SHGetPathFromIDListW` writes into a fixed 260-unit buffer.
+            let mut buffer = [0u16; 260];
+            let ok = unsafe { SHGetPathFromIDListW(pidl, &mut buffer) };
+            unsafe { CoTaskMemFree(Some(pidl as *const core::ffi::c_void)) };
+            if ok.as_bool() {
+                let length = buffer
+                    .iter()
+                    .position(|unit| *unit == 0)
+                    .unwrap_or(buffer.len());
+                (length > 0).then(|| PathBuf::from(OsString::from_wide(&buffer[..length])))
+            } else {
+                None
+            }
+        };
+
+        // Balance our own successful initialization (S_OK); leave foreign
+        // apartments (S_FALSE) and refused ones (RPC_E_CHANGED_MODE) alone.
+        if com.is_ok() {
+            unsafe { CoUninitialize() };
+        }
+        picked
     }
 }
 

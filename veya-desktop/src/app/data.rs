@@ -154,6 +154,60 @@ impl App {
         }
     }
 
+    // --- Database storage directory customisation ---------------------------
+
+    /// Open the native folder picker so the user can choose where the database
+    /// should live on the next launch. Runs off the UI thread because the
+    /// dialog blocks; the result comes back as [`Message::DbFolderPicked`].
+    pub(super) fn browse_db_folder(&mut self) -> Task<Message> {
+        if self.data_job.locked() {
+            return Task::none();
+        }
+        self.data_job = DataJob::Working("请在对话框中选择数据库存储文件夹…");
+        Task::perform(
+            run_blocking(|| dialog::pick_folder("选择数据库存储文件夹", WINDOW_TITLE)),
+            |picked| Message::DbFolderPicked(picked.ok().flatten()),
+        )
+    }
+
+    /// Folder picker returned: fill the input box with the chosen path (or do
+    /// nothing on cancel). Does not persist yet — the user clicks "应用" first
+    /// so they can edit the picked path before committing.
+    pub(super) fn db_folder_picked(&mut self, folder: Option<PathBuf>) -> Task<Message> {
+        if matches!(self.data_job, DataJob::Working(_)) {
+            self.data_job = DataJob::Idle;
+        }
+        if let Some(path) = folder {
+            self.db_path_input = path.display().to_string();
+        }
+        Task::none()
+    }
+
+    /// Persist the current draft path to the sidecar config. An empty draft
+    /// clears the override (falls back to default). The change only takes
+    /// effect after restarting Veya, so the status note says so.
+    pub(super) fn apply_db_path(&mut self) -> Task<Message> {
+        if self.data_job.locked() {
+            return Task::none();
+        }
+        let dir = self.db_path_input.trim().to_string();
+        let _ = self.worker.send(WorkerCmd::SetDbPath { dir });
+        Task::none()
+    }
+
+    /// Clear the override and fall back to the default storage directory.
+    /// Resets the input box and sends an empty `SetDbPath` to the worker.
+    pub(super) fn reset_db_path(&mut self) -> Task<Message> {
+        if self.data_job.locked() {
+            return Task::none();
+        }
+        self.db_path_input.clear();
+        let _ = self.worker.send(WorkerCmd::SetDbPath {
+            dir: String::new(),
+        });
+        Task::none()
+    }
+
     /// The worker finished (or refused) a restore. On success every piece of view state
     /// that pointed into the old data is dropped and the list is queried again.
     pub(super) fn database_restored(
@@ -370,6 +424,79 @@ mod tests {
 
         let _ = app.database_restored(Err("还原失败".into()));
         assert!(matches!(app.data_job, DataJob::Done(Err(_))));
+    }
+
+    #[test]
+    fn browsing_a_db_folder_locks_then_fills_the_input() {
+        let mut app = isolated_app();
+        let _ = app.update(Message::BrowseDbFolder);
+        assert!(
+            matches!(app.data_job, DataJob::Working(note) if note.contains("数据库存储文件夹")),
+            "the picker runs as a busy job so further clicks are ignored"
+        );
+        let _ = app.update(Message::BackupDatabase);
+        assert!(
+            matches!(app.data_job, DataJob::Working(note) if note.contains("数据库存储文件夹")),
+            "a second request must not replace the running picker"
+        );
+
+        let picked = PathBuf::from("C:/VeyaData");
+        let _ = app.update(Message::DbFolderPicked(Some(picked.clone())));
+        assert!(matches!(app.data_job, DataJob::Idle));
+        assert_eq!(app.db_path_input, picked.display().to_string());
+
+        // Cancelling the dialog leaves any typed draft untouched.
+        app.db_path_input = "C:/typed".into();
+        let _ = app.update(Message::DbFolderPicked(None));
+        assert_eq!(app.db_path_input, "C:/typed");
+    }
+
+    #[test]
+    fn applying_a_db_path_sends_the_trimmed_draft_and_reset_sends_empty() {
+        let mut app = isolated_app();
+        let (cmd_tx, cmd_rx) = std::sync::mpsc::channel();
+        app.worker.cmd_tx = cmd_tx;
+
+        app.db_path_input = "  C:/VeyaData  ".into();
+        let _ = app.update(Message::ApplyDbPath);
+        assert!(
+            matches!(cmd_rx.try_recv(), Ok(WorkerCmd::SetDbPath { dir }) if dir == "C:/VeyaData"),
+            "the stored draft is trimmed before it reaches the worker"
+        );
+
+        let _ = app.update(Message::ResetDbPath);
+        assert_eq!(app.db_path_input, "");
+        assert!(matches!(
+            cmd_rx.try_recv(),
+            Ok(WorkerCmd::SetDbPath { dir }) if dir.is_empty()
+        ));
+    }
+
+    #[test]
+    fn db_path_actions_are_locked_while_a_job_is_running() {
+        let mut app = isolated_app();
+        let (cmd_tx, cmd_rx) = std::sync::mpsc::channel();
+        app.worker.cmd_tx = cmd_tx;
+        app.db_path_input = "C:/VeyaData".into();
+        let _ = app.update(Message::RestoreDatabase);
+        assert!(matches!(app.data_job, DataJob::Working(_)));
+
+        let _ = app.apply_db_path();
+        let _ = app.reset_db_path();
+        assert!(
+            cmd_rx.try_recv().is_err(),
+            "no path change is sent while a restore is being confirmed"
+        );
+        assert_eq!(
+            app.db_path_input, "C:/VeyaData",
+            "reset is also blocked, so the draft survives"
+        );
+
+        let _ = app.update(Message::DbFolderPicked(None));
+        assert!(
+            !app.db_path_input.is_empty(),
+            "a late picker completion must not unlock mid-job edits"
+        );
     }
 
     #[test]

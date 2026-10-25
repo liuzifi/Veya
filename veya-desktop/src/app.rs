@@ -37,10 +37,16 @@ mod update;
 use tracking::TrackingControl;
 use update::UpdateCheck;
 
-/// The initial window is hidden until it has moved to the cursor monitor.
-fn show_initial_window(physical_position: Option<(f32, f32)>) -> Task<Message> {
+/// Prepare the existing window without opening the manager when a tray is
+/// available. A failed tray still gets a visible, reachable manager fallback.
+fn prepare_initial_window(
+    physical_position: Option<(f32, f32)>,
+    visible: bool,
+    token: std::sync::Arc<std::sync::atomic::AtomicU64>,
+) -> Task<Message> {
     iced::window::get_latest().then(move |id| {
         let Some(id) = id else { return Task::none() };
+        let token = token.clone();
         iced::window::get_scale_factor(id).then(move |scale| {
             let move_window = physical_position
                 .map(|physical| {
@@ -50,8 +56,14 @@ fn show_initial_window(physical_position: Option<(f32, f32)>) -> Task<Message> {
                     iced::window::move_to(id, iced::Point::new(logical.0, logical.1))
                 })
                 .unwrap_or_else(Task::none);
+            let mode = if visible {
+                iced::window::Mode::Windowed
+            } else {
+                iced::window::Mode::Hidden
+            };
             move_window
-                .chain(iced::window::change_mode(id, iced::window::Mode::Windowed))
+                .chain(iced::window::change_mode(id, mode))
+                .chain(window_taskbar_role(id, visible, 0, token.clone()))
                 .chain(Task::done(Message::WindowReady(id)))
         })
     })
@@ -82,9 +94,40 @@ fn minimize_window() -> Task<Message> {
     })
 }
 
+/// Apply native taskbar effects on the Iced window thread, and reject an
+/// already-dispatched effect if another window session has superseded it.
+fn window_taskbar_role(
+    id: iced::window::Id,
+    visible: bool,
+    generation: u64,
+    token: std::sync::Arc<std::sync::atomic::AtomicU64>,
+) -> Task<Message> {
+    #[cfg(windows)]
+    {
+        iced::window::run_with_handle(id, move |handle| {
+            if token.load(std::sync::atomic::Ordering::SeqCst) != generation {
+                return;
+            }
+            if let iced::window::raw_window_handle::RawWindowHandle::Win32(handle) = handle.as_raw() {
+                let _ = veya_windows::platform::window_place::set_window_taskbar_visible(
+                    handle.hwnd.get(),
+                    visible,
+                );
+            }
+        })
+        .then(|()| Task::none())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (id, visible, generation, token);
+        Task::none()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WindowAction {
     Show,
+    Settings,
     Quick(Option<PasteTarget>),
     Hide,
     Minimize,
@@ -93,7 +136,6 @@ enum WindowAction {
 /// Coalesce queued window requests before starting an Iced window task.
 fn resolve_window_signals(
     initially_hidden: bool,
-    tray_available: bool,
     mut quick_open: bool,
     signals: impl IntoIterator<Item = WindowSignal>,
 ) -> Option<WindowAction> {
@@ -102,11 +144,13 @@ fn resolve_window_signals(
     for signal in signals {
         let next = match signal {
             WindowSignal::Activate => WindowAction::Show,
+            WindowSignal::OpenSettings => WindowAction::Settings,
             WindowSignal::Hotkey { visible, target } if !quick_open || hidden || !visible => {
                 WindowAction::Quick(target)
             }
-            WindowSignal::Hotkey { .. } if tray_available => WindowAction::Hide,
-            WindowSignal::Hotkey { .. } => WindowAction::Minimize,
+            // A quick panel never falls back to a minimized manager/taskbar
+            // button, even if the tray is unavailable. The hotkey reopens it.
+            WindowSignal::Hotkey { .. } => WindowAction::Hide,
         };
         hidden = matches!(next, WindowAction::Hide | WindowAction::Minimize);
         quick_open = matches!(next, WindowAction::Quick(_));
@@ -126,20 +170,20 @@ mod window_signal_tests {
             target: None,
         };
         assert_eq!(
-            resolve_window_signals(false, true, true, [hotkey(true)]),
+            resolve_window_signals(false, true, [hotkey(true)]),
             Some(WindowAction::Hide)
         );
         assert_eq!(
-            resolve_window_signals(false, true, false, [hotkey(true)]),
+            resolve_window_signals(false, false, [hotkey(true)]),
             Some(WindowAction::Quick(None))
         );
         assert_eq!(
-            resolve_window_signals(true, true, false, [hotkey(false)]),
+            resolve_window_signals(true, false, [hotkey(false)]),
             Some(WindowAction::Quick(None))
         );
         assert_eq!(
-            resolve_window_signals(false, false, true, [hotkey(true)]),
-            Some(WindowAction::Minimize)
+            resolve_window_signals(true, true, [hotkey(false)]),
+            Some(WindowAction::Quick(None))
         );
     }
 
@@ -150,14 +194,14 @@ mod window_signal_tests {
             target: None,
         };
         assert_eq!(
-            resolve_window_signals(false, true, true, [visible, visible]),
+            resolve_window_signals(false, true, [visible, visible]),
             Some(WindowAction::Quick(None))
         );
         assert_eq!(
-            resolve_window_signals(false, true, true, [visible, WindowSignal::Activate]),
+            resolve_window_signals(false, true, [visible, WindowSignal::Activate]),
             Some(WindowAction::Show)
         );
-        assert_eq!(resolve_window_signals(false, true, false, []), None);
+        assert_eq!(resolve_window_signals(false, false, []), None);
     }
 }
 
@@ -247,6 +291,8 @@ pub struct App {
     quick: Option<quick::QuickPanel>,
     next_paste_request: u64,
     window_generation: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// Abort native task streams at session boundaries, not just their replies.
+    window_tasks: Vec<iced::task::Handle>,
     last_paste_error: Option<String>,
     shared: SharedUi,
     worker: WorkerHandle,
@@ -307,6 +353,13 @@ pub struct App {
     chrome_sync_pending: bool,
     chrome_sync_attempts: u8,
     updates: UpdateCheck,
+    /// Draft text for the custom database storage directory input box.
+    db_path_input: String,
+    /// Built-in default storage directory, shown read-only beside the input.
+    db_path_default: String,
+    /// Directory currently in effect (custom override or default), shown
+    /// read-only so the user can confirm where their data lives.
+    db_path_current: String,
 }
 
 /// Inline text input state for creating or renaming a quick-paste group tab.
@@ -514,6 +567,18 @@ pub enum Message {
     DownloadUpdate,
     OpenReleases,
     OpenRepository,
+    /// Database storage directory customisation (settings → 数据库管理).
+    /// Draft text typed into the path input box.
+    DbPathInput(String),
+    /// User clicked the "浏览…" button; opens the native folder picker.
+    BrowseDbFolder,
+    /// Folder picker returned (`Some(path)` = picked, `None` = cancelled).
+    DbFolderPicked(Option<std::path::PathBuf>),
+    /// Persist the current draft path (or clear it when empty) to the sidecar
+    /// config so the next launch uses the new location.
+    ApplyDbPath,
+    /// Clear the override and fall back to the default storage directory.
+    ResetDbPath,
 }
 
 impl App {
@@ -544,18 +609,19 @@ impl App {
             ThemeMode::Dark => &crate::theme::DARK,
             ThemeMode::Light => &crate::theme::LIGHT,
         });
-        (
-            Self {
+        let window_hidden = tray_rx.is_some();
+        let mut app = Self {
                 quick: None,
                 next_paste_request: 0,
                 window_generation: Default::default(),
+                window_tasks: Vec::new(),
                 last_paste_error: None,
                 state,
                 shared,
                 worker,
                 tray_rx,
                 activation_rx,
-                window_hidden: false,
+                window_hidden,
                 window_id: None,
                 hotkey_recording: false,
                 hotkey_record_error: None,
@@ -595,9 +661,19 @@ impl App {
                 chrome_sync_pending: true,
                 chrome_sync_attempts: 0,
                 updates: UpdateCheck::default(),
-            },
-            show_initial_window(startup_position),
-        )
+                db_path_input: crate::config::read_custom_db_dir()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default(),
+                db_path_default: crate::worker::default_db_dir().display().to_string(),
+                db_path_current: crate::worker::current_db_dir().display().to_string(),
+        };
+        let startup = prepare_initial_window(
+            startup_position,
+            !window_hidden,
+            app.window_generation.clone(),
+        );
+        let startup = app.guard_window_task(startup);
+        (app, startup)
     }
 
     pub fn theme(&self) -> Theme {
@@ -759,8 +835,11 @@ impl App {
     fn sync_chrome_now(&mut self) {
         #[cfg(windows)]
         {
-            self.chrome_sync_pending =
-                !veya_windows::platform::chrome::apply_rounded_corners("Veya");
+            let chrome = veya_windows::platform::chrome::apply_rounded_corners("Veya");
+            let taskbar = veya_windows::platform::window_place::set_app_window_taskbar_visible(
+                !self.window_hidden && self.quick.is_none(),
+            );
+            self.chrome_sync_pending = !chrome || !taskbar;
         }
         #[cfg(not(windows))]
         {
@@ -853,6 +932,14 @@ impl App {
                 self.cancel_restore();
                 Task::none()
             }
+            Message::DbPathInput(text) => {
+                self.db_path_input = text;
+                Task::none()
+            }
+            Message::BrowseDbFolder => self.browse_db_folder(),
+            Message::DbFolderPicked(folder) => self.db_folder_picked(folder),
+            Message::ApplyDbPath => self.apply_db_path(),
+            Message::ResetDbPath => self.reset_db_path(),
             Message::QuickStripPress => self.quick_strip_press(),
             Message::QuickToggleFold => self.quick_toggle_fold(),
             Message::QuickHoverExpand => self.quick_hover_expand(),
@@ -1185,9 +1272,7 @@ impl App {
                         TrayCmd::Exit => return self.quit(),
                         TrayCmd::OpenWindow => window_signals.push(WindowSignal::Activate),
                         TrayCmd::OpenSettings => {
-                            self.page = Page::Settings;
-                            self.set_history_active(false);
-                            window_signals.push(WindowSignal::Activate);
+                            window_signals.push(WindowSignal::OpenSettings);
                         }
                         other => {
                             tray::apply_tray_action(&other, &self.worker);
@@ -1205,7 +1290,6 @@ impl App {
                 }
                 if let Some(action) = resolve_window_signals(
                     self.window_hidden,
-                    self.tray_rx.is_some(),
                     self.quick.is_some(),
                     window_signals,
                 ) {
@@ -1748,15 +1832,10 @@ impl App {
                 .unwrap_or_else(Task::none),
             Message::WindowReady(id) => {
                 self.window_id = Some(id);
-                self.set_history_active(self.page == Page::History);
+                self.set_history_active(!self.window_hidden && self.page == Page::History);
                 Task::none()
             }
-            Message::WindowMinimize => {
-                self.cancel_hotkey_recording();
-                self.window_hidden = false;
-                self.set_history_active(false);
-                minimize_window()
-            }
+            Message::WindowMinimize => self.apply_window_action(WindowAction::Minimize),
             Message::WindowToggleMaximize => iced::window::get_latest().then(|id| {
                 id.map(iced::window::toggle_maximize)
                     .unwrap_or_else(Task::none)
@@ -1769,11 +1848,7 @@ impl App {
             }
             Message::WindowRestored { id, generation } => {
                 if !self.generation_is_current(generation) || self.window_hidden {
-                    return if self.window_hidden {
-                        hide_window()
-                    } else {
-                        Task::none()
-                    };
+                    return Task::none();
                 }
                 self.window_id = Some(id);
                 self.set_history_active(self.page == Page::History);
@@ -1781,12 +1856,19 @@ impl App {
                 veya_windows::platform::singleton::ensure_main_window_visible();
                 self.chrome_sync_pending = true;
                 self.chrome_sync_attempts = 0;
-                let focus = iced::window::gain_focus(id);
-                if self.quick.is_some() {
+                let taskbar = window_taskbar_role(
+                    id,
+                    self.quick.is_none(),
+                    generation,
+                    self.window_generation.clone(),
+                );
+                let focus = taskbar.chain(iced::window::gain_focus(id));
+                let focus = if self.quick.is_some() {
                     focus.chain(text_input::focus(search_input_id()))
                 } else {
                     focus
-                }
+                };
+                self.guard_window_task(focus)
             }
             Message::WindowClose => {
                 if self.quick.is_some() {
@@ -1796,7 +1878,8 @@ impl App {
                 self.set_history_active(false);
                 if self.tray_rx.is_some() {
                     self.window_hidden = true;
-                    hide_window()
+                    self.advance_window_generation();
+                    self.guard_window_task(hide_window())
                 } else {
                     self.quit()
                 }
@@ -1934,27 +2017,33 @@ impl App {
                 }
                 // Restoring the manager from the tray must not inherit a
                 // translucent state previewed in the settings opacity box.
+                let generation = self.advance_window_generation();
                 quick::apply_quick_opacity(1.0);
                 self.window_hidden = false;
                 self.set_history_active(self.page == Page::History);
-                let generation = self.advance_window_generation();
-                activate_window(generation)
+                self.guard_window_task(activate_window(generation))
             }
+            WindowAction::Settings => self.open_settings(),
             WindowAction::Quick(target) => self.show_quick(target),
             WindowAction::Hide => {
                 if self.quick.is_some() {
                     return self.dismiss_quick(true);
                 }
+                self.advance_window_generation();
                 self.cancel_hotkey_recording();
                 self.window_hidden = true;
                 self.set_history_active(false);
-                hide_window()
+                self.guard_window_task(hide_window())
             }
             WindowAction::Minimize => {
+                if self.quick.is_some() {
+                    return self.dismiss_quick(true);
+                }
+                self.advance_window_generation();
                 self.cancel_hotkey_recording();
                 self.window_hidden = false;
                 self.set_history_active(false);
-                minimize_window()
+                self.guard_window_task(minimize_window())
             }
         }
     }
@@ -2009,6 +2098,11 @@ impl App {
     }
 
     pub fn view(&self) -> Element<'_, Message> {
+        // Do not build a hidden settings/manager view while dismissing a panel
+        // or waiting in the tray; its native hide task may still be pending.
+        if self.window_hidden {
+            return Space::new(Length::Fill, Length::Fill).into();
+        }
         if self.quick.is_some() {
             return self.quick_view();
         }

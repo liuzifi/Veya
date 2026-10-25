@@ -6,11 +6,18 @@ use windows::Win32::Graphics::Gdi::{
     ClientToScreen, GetDC, GetDeviceCaps, GetMonitorInfoW, MonitorFromPoint, ReleaseDC, HMONITOR,
     LOGPIXELSX, MONITORINFO, MONITOR_DEFAULTTONEAREST,
 };
+use windows::Win32::System::Com::{
+    CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
+    COINIT_APARTMENTTHREADED,
+};
 use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
+use windows::Win32::System::Threading::GetCurrentProcessId;
+use windows::Win32::UI::Shell::{ITaskbarList, TaskbarList};
 use windows::Win32::UI::WindowsAndMessaging::{
     FindWindowExW, GetCursorPos, GetForegroundWindow, GetGUIThreadInfo, GetWindowLongPtrW,
-    GetWindowThreadProcessId, SetLayeredWindowAttributes, SetWindowLongPtrW, GUITHREADINFO,
-    GWL_EXSTYLE, LWA_ALPHA, WS_EX_LAYERED,
+    GetWindowThreadProcessId, IsWindowVisible, SetLayeredWindowAttributes, SetWindowLongPtrW,
+    SetWindowPos, GUITHREADINFO, GWL_EXSTYLE, LWA_ALPHA, SWP_FRAMECHANGED, SWP_NOACTIVATE,
+    SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_TOOLWINDOW,
 };
 
 type GetDpiForMonitorFn = unsafe extern "system" fn(HMONITOR, i32, *mut u32, *mut u32) -> HRESULT;
@@ -205,8 +212,93 @@ pub fn caret_physical_position() -> Option<(f32, f32)> {
 }
 
 /// The single shared Veya window (manager and quick picker reuse one window).
+/// Never change a same-titled window belonging to another process.
 fn find_app_window() -> Option<HWND> {
-    unsafe { FindWindowExW(None, None, PCWSTR::null(), w!("Veya")).ok() }
+    unsafe {
+        let mut after = None;
+        loop {
+            let hwnd = FindWindowExW(None, after, PCWSTR::null(), w!("Veya")).ok()?;
+            let mut process_id = 0;
+            GetWindowThreadProcessId(hwnd, Some(&mut process_id));
+            if process_id == GetCurrentProcessId() {
+                return Some(hwnd);
+            }
+            after = Some(hwnd);
+        }
+    }
+}
+
+fn taskbar_style(style: isize, visible: bool) -> isize {
+    let unrelated = style & !((WS_EX_APPWINDOW.0 | WS_EX_TOOLWINDOW.0) as isize);
+    unrelated
+        | if visible {
+            WS_EX_APPWINDOW.0 as isize
+        } else {
+            WS_EX_TOOLWINDOW.0 as isize
+        }
+}
+
+/// Change the role of an existing, process-owned window; never create a window
+/// or start a process. Quick/hidden windows are tools; only explicit manager
+/// and settings windows belong in the taskbar and Alt+Tab.
+///
+/// Call on the window thread after Iced's mode/level changes: Winit can replace
+/// the extended style during those operations. Shell notification also removes
+/// a taskbar button left over from the window's previous manager role.
+/// All APIs used here are available on Windows 7.
+pub fn set_window_taskbar_visible(raw_hwnd: isize, visible: bool) -> bool {
+    let hwnd = HWND(raw_hwnd as *mut core::ffi::c_void);
+    unsafe {
+        let mut process_id = 0;
+        if hwnd.is_invalid()
+            || GetWindowThreadProcessId(hwnd, Some(&mut process_id)) == 0
+            || process_id != GetCurrentProcessId()
+        {
+            return false;
+        }
+        let current = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        let wanted = taskbar_style(current, visible);
+        let style_ok = if current == wanted {
+            true
+        } else {
+            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, wanted);
+            let refreshed = SetWindowPos(
+                hwnd,
+                None,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+            );
+            refreshed.is_ok() && GetWindowLongPtrW(hwnd, GWL_EXSTYLE) == wanted
+        };
+
+        // Winit may already have initialized COM in another apartment. In that
+        // case use that apartment, and only balance our own successful init.
+        let initialized = CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok();
+        let shell_result = (|| -> windows::core::Result<()> {
+            let taskbar: ITaskbarList =
+                CoCreateInstance(&TaskbarList, None, CLSCTX_INPROC_SERVER)?;
+            taskbar.HrInit()?;
+            if visible && IsWindowVisible(hwnd).as_bool() {
+                taskbar.AddTab(hwnd)
+            } else {
+                taskbar.DeleteTab(hwnd)
+            }
+        })();
+        if initialized {
+            CoUninitialize();
+        }
+        style_ok && shell_result.is_ok()
+    }
+}
+
+/// Reapply the current role after a native resize/level update.
+pub fn set_app_window_taskbar_visible(visible: bool) -> bool {
+    find_app_window()
+        .map(|hwnd| set_window_taskbar_visible(hwnd.0 as isize, visible))
+        .unwrap_or(false)
 }
 
 /// Give the window per-pixel alpha via `WS_EX_LAYERED`. `opacity` is 0.0
@@ -238,7 +330,63 @@ pub fn clear_window_opacity() -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{fit_and_anchor, fit_and_center, physical_to_window_logical};
+    use super::{fit_and_anchor, fit_and_center, physical_to_window_logical, taskbar_style};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    };
+
+    #[test]
+    fn quick_and_hidden_roles_remove_the_taskbar_flag_without_losing_other_styles() {
+        let unrelated = (WS_EX_LAYERED.0 | WS_EX_TOPMOST.0) as isize;
+        let manager = unrelated | WS_EX_APPWINDOW.0 as isize;
+        let quick = taskbar_style(manager, false);
+        assert_eq!(quick & WS_EX_APPWINDOW.0 as isize, 0);
+        assert_ne!(quick & WS_EX_TOOLWINDOW.0 as isize, 0);
+        assert_eq!(quick & unrelated, unrelated);
+        assert_eq!(taskbar_style(quick, false), quick);
+    }
+
+    #[test]
+    fn explicitly_opening_settings_restores_the_normal_taskbar_role() {
+        let unrelated = (WS_EX_LAYERED.0 | WS_EX_TOPMOST.0) as isize;
+        let manager = unrelated | WS_EX_APPWINDOW.0 as isize;
+        let mut style = manager;
+        for _ in 0..100 {
+            style = taskbar_style(style, false);
+            style = taskbar_style(style, true);
+            assert_eq!(style, manager);
+            assert_eq!(style & WS_EX_TOOLWINDOW.0 as isize, 0);
+        }
+    }
+
+    #[test]
+    fn rapid_quick_open_dismiss_reopen_round_trips_back_to_app_window() {
+        // Phase 7 regression guard: opening the quick panel, dismissing it to
+        // the tray, and reopening must end with WS_EX_APPWINDOW set and
+        // WS_EX_TOOLWINDOW cleared, mirroring a fresh manager. A stale
+        // tool-window flag left by the dismissed panel would make the shared
+        // window vanish from the taskbar after the manager is restored.
+        let unrelated = (WS_EX_LAYERED.0 | WS_EX_TOPMOST.0) as isize;
+        let manager = unrelated | WS_EX_APPWINDOW.0 as isize;
+        let mut style = manager;
+        // open quick panel → tool window.
+        style = taskbar_style(style, false);
+        assert_ne!(style & WS_EX_TOOLWINDOW.0 as isize, 0);
+        // dismiss to tray → stays a tool window.
+        style = taskbar_style(style, false);
+        // reopen quick → still a tool window.
+        style = taskbar_style(style, false);
+        // restore manager → app window again, unrelated bits intact.
+        style = taskbar_style(style, true);
+        assert_eq!(style, manager);
+        assert_eq!(style & WS_EX_TOOLWINDOW.0 as isize, 0);
+    }
+
+    #[test]
+    fn taskbar_changes_reject_an_invalid_window() {
+        assert!(!super::set_window_taskbar_visible(0, false));
+        assert!(!super::set_window_taskbar_visible(0, true));
+    }
 
     #[test]
     fn centers_on_scaled_secondary_monitor_with_negative_origin() {

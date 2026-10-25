@@ -733,6 +733,71 @@ impl App {
         .spacing(12)
         .align_y(Alignment::Center);
 
+        let db_path_locked = self.data_job.locked();
+        let db_path_input_box = text_input("留空使用默认路径", &self.db_path_input)
+            .on_input(Message::DbPathInput)
+            .on_submit(Message::ApplyDbPath)
+            .padding(pad(6.0, 10.0, 6.0, 10.0))
+            .size(12)
+            .style(theme::input_style)
+            .width(Length::Fixed(240.0));
+        let db_path_button = |label: &'static str, message: Message| {
+            let base = button(text(label).size(12))
+                .style(theme::action_button)
+                .padding(pad(7.0, 14.0, 7.0, 14.0));
+            if db_path_locked { base } else { base.on_press(message) }
+        };
+        let db_path_apply = {
+            let base = button(text("应用").size(12))
+                .style(theme::action_button)
+                .padding(pad(7.0, 14.0, 7.0, 14.0));
+            // An empty input is a valid "restore default" request, so the
+            // apply button only needs the busy-state guard.
+            if db_path_locked {
+                base
+            } else {
+                base.on_press(Message::ApplyDbPath)
+            }
+        };
+        let db_path_show_reset = !self.db_path_input.trim().is_empty()
+            && self.db_path_input.trim() != self.db_path_default.trim();
+        let mut db_path_actions = row![
+            db_path_button("浏览…", Message::BrowseDbFolder),
+            db_path_apply,
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center);
+        if db_path_show_reset {
+            db_path_actions = db_path_actions.push(
+                button(text("恢复默认").size(12).color(theme::MUTED()))
+                    .on_press(Message::ResetDbPath)
+                    .style(theme::action_button)
+                    .padding(pad(7.0, 14.0, 7.0, 14.0)),
+            );
+        }
+        let db_path_input_column = column![
+            db_path_input_box,
+            meta(format!("默认路径：{}", self.db_path_default))
+                .size(10)
+                .color(theme::MUTED()),
+        ]
+        .spacing(4);
+        let db_path_row = row![
+            icons::icon(Icon::External, theme::ACCENT(), 18.0),
+            column![
+                body("数据库存储路径").size(13).font(crate::font::name_font()),
+                meta(format!("当前生效：{}", self.db_path_current))
+                    .size(11)
+                    .color(theme::MUTED()),
+            ]
+            .spacing(2)
+            .width(Length::Fill),
+            db_path_input_column,
+            db_path_actions,
+        ]
+        .spacing(12)
+        .align_y(Alignment::Center);
+
         let group_data = container(
             column![
                 data_stats_row,
@@ -740,6 +805,10 @@ impl App {
                 theme::hdivider(),
                 Space::with_height(12.0),
                 self.backup_section(),
+                Space::with_height(12.0),
+                theme::hdivider(),
+                Space::with_height(12.0),
+                db_path_row,
                 Space::with_height(12.0),
                 theme::hdivider(),
                 Space::with_height(12.0),

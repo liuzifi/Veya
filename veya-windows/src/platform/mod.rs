@@ -85,6 +85,8 @@ impl std::error::Error for ClipboardWriteError {}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WindowSignal {
     Activate,
+    /// An explicit settings request; never inferred from a hotkey or snapshot.
+    OpenSettings,
     Hotkey {
         visible: bool,
         target: Option<PasteTarget>,

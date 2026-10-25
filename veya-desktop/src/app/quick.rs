@@ -45,6 +45,12 @@ struct QuickMetrics {
     row_padding: f32,
     /// Vertical spacing between body and metadata inside a row.
     inner_spacing: f32,
+    /// Vertical gap between adjacent quick-panel cards. Applied as the list
+    /// column's `spacing`; `row_height_with_lines` keeps the button itself at
+    /// the pure content height, so the gap is real whitespace between cards
+    /// rather than padding inside them. `row_stride_with_lines` adds the gap
+    /// back in for scroll math and window sizing so ten rows still fit.
+    row_gap: f32,
 }
 
 impl QuickMetrics {
@@ -63,6 +69,9 @@ impl QuickMetrics {
         let row_spacing = (8.0 * scale).max(6.0);
         let row_padding = (6.0 * scale).max(4.0);
         let inner_spacing = (3.0 * scale).max(2.0);
+        // Default 13 → 4 px gap; scales with font size so larger panels get a
+        // proportionally wider breathing space between cards (max 6 px).
+        let row_gap = (4.0 * scale).max(3.0).min(6.0);
         Self {
             body,
             meta,
@@ -74,12 +83,23 @@ impl QuickMetrics {
             row_spacing,
             row_padding,
             inner_spacing,
+            row_gap,
         }
     }
 
-    /// Row height for the configured number of preview lines.
+    /// Height of a single card's button for the configured number of preview
+    /// lines. This is the pure content height — the inter-card gap is added on
+    /// top by [`row_stride_with_lines`], so the button does not pad itself with
+    /// the gap and the visual whitespace sits between cards.
     fn row_height_with_lines(&self, lines: u32) -> f32 {
         self.row_height + lines.saturating_sub(1) as f32 * self.extra_line_height
+    }
+
+    /// Vertical space a row occupies in the scrolling list: the card's button
+    /// height plus the inter-card gap. Scroll math and window sizing use this
+    /// stride so the snap-to and resize calculations match the rendered list.
+    fn row_stride_with_lines(&self, lines: u32) -> f32 {
+        self.row_height_with_lines(lines) + self.row_gap
     }
 }
 
@@ -95,11 +115,15 @@ const DEFAULT_METRICS: QuickMetrics = QuickMetrics {
     row_spacing: 8.0,
     row_padding: 6.0,
     inner_spacing: 3.0,
+    row_gap: 4.0,
 };
 
 /// Nominal panel height at the default font size, used as the window size baseline.
+/// Each row contributes its stride (button height + inter-card gap) so the sized
+/// window holds the same ten rows the renderer lays out.
 const QUICK_HEIGHT: f32 =
-    QUICK_VISIBLE_ROWS as f32 * DEFAULT_METRICS.row_height + QUICK_CHROME_HEIGHT;
+    QUICK_VISIBLE_ROWS as f32 * (DEFAULT_METRICS.row_height + DEFAULT_METRICS.row_gap)
+        + QUICK_CHROME_HEIGHT;
 const ROW_NUMBER_LABELS: [&str; NUMBERED_ROWS] = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"];
 /// Two presses on the strip closer than this toggle the always-on-top pin.
 const STRIP_DOUBLE_CLICK: std::time::Duration = std::time::Duration::from_millis(400);
@@ -155,10 +179,25 @@ impl QuickPanel {
 }
 
 impl App {
-    pub(super) fn advance_window_generation(&self) -> u64 {
+    pub(super) fn advance_window_generation(&mut self) -> u64 {
+        // A generation check on a completion is too late: the old stream may
+        // already have queued a show, hide, resize or focus effect. Stop the
+        // streams themselves before starting the next window session.
+        for task in self.window_tasks.drain(..) {
+            task.abort();
+        }
         self.window_generation
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
             .wrapping_add(1)
+    }
+
+    pub(super) fn guard_window_task(&mut self, task: Task<Message>) -> Task<Message> {
+        // Drop already-finished handles so long-lived sessions (a pinned
+        // panel that folds/unfolds many times) do not retain them forever.
+        self.window_tasks.retain(|handle| !handle.is_aborted());
+        let (task, handle) = task.abortable();
+        self.window_tasks.push(handle.abort_on_drop());
+        task
     }
 
     pub(super) fn generation_is_current(&self, generation: u64) -> bool {
@@ -226,11 +265,14 @@ impl App {
         self.window_hidden = false;
         self.set_history_active(true);
         let query = self.request_history_query(true);
+        #[cfg(windows)]
+        let _ = veya_windows::platform::window_place::set_app_window_taskbar_visible(false);
         if self.quick.as_ref().is_some_and(|quick| quick.strip.pinned) {
             // A pinned picker keeps the place the user dragged it to; the hotkey
             // only refreshes the paste target and brings the panel back to focus.
             let unfold = self.set_quick_folded(false);
-            return Task::batch([query, unfold, activate_window(generation)]);
+            let window = self.guard_window_task(unfold.chain(activate_window(generation)));
+            return Task::batch([query, window]);
         }
         let settings = self.state.quick_settings;
         let window_height = self.quick_window_height();
@@ -308,7 +350,8 @@ impl App {
                 }),
             })
         });
-        Task::batch([query, window, level])
+        let window = self.guard_window_task(level.chain(window));
+        Task::batch([query, window])
     }
 
     fn restore_management_state(&mut self) -> Option<iced::Size> {
@@ -319,6 +362,9 @@ impl App {
         self.sort_order = quick.saved.sort_order;
         self.history_page = quick.saved.history_page;
         self.state.selected = quick.saved.selected;
+        // A new open can arrive before the native resize event. Save the
+        // manager size synchronously instead of snapshotting the old panel.
+        self.window_size = quick.saved.size;
         Some(quick.saved.size)
     }
 
@@ -326,10 +372,10 @@ impl App {
         if self.quick.as_ref().is_some_and(|quick| quick.sending) {
             return Task::none();
         }
+        let generation = self.advance_window_generation();
         apply_quick_opacity(1.0);
         let leave = self.leave_strip_state();
         let size = self.restore_management_state();
-        let generation = self.advance_window_generation();
         self.window_hidden = false;
         self.set_history_active(self.page == Page::History);
         let query = self.request_history_query(false);
@@ -340,6 +386,7 @@ impl App {
             };
             resize.chain(activate_window(generation))
         }));
+        let window = self.guard_window_task(window);
         Task::batch([query, window])
     }
 
@@ -351,10 +398,10 @@ impl App {
         if self.quick.as_ref().is_some_and(|quick| quick.sending) {
             return Task::none();
         }
+        let generation = self.advance_window_generation();
         apply_quick_opacity(1.0);
         let leave = self.leave_strip_state();
         let size = self.restore_management_state();
-        let generation = self.advance_window_generation();
         self.window_hidden = false;
         self.page = Page::Settings;
         self.set_history_active(false);
@@ -365,7 +412,7 @@ impl App {
             };
             resize.chain(activate_window(generation))
         }));
-        window
+        self.guard_window_task(window)
     }
 
     /// Undo what pinning and folding did to the native window (topmost level,
@@ -402,24 +449,29 @@ impl App {
             return Task::none();
         }
         let target = quick.target;
+        let generation = self.advance_window_generation();
         self.quick_group_input = None;
         apply_quick_opacity(1.0);
         let leave = self.leave_strip_state();
-        let generation = self.advance_window_generation();
         let size = self.restore_management_state();
         self.window_hidden = true;
         self.set_history_active(false);
-        hide_window()
+        let token = self.window_generation.clone();
+        let window = hide_window()
             .chain(leave)
-            .chain(iced::window::get_latest().then(move |id| match (id, size) {
-                (Some(id), Some(size)) => iced::window::resize(id, size),
-                _ => Task::none(),
+            .chain(iced::window::get_latest().then(move |id| {
+                let Some(id) = id else { return Task::none() };
+                let resize = size
+                    .map(|size| iced::window::resize(id, size))
+                    .unwrap_or_else(Task::none);
+                resize.chain(window_taskbar_role(id, false, generation, token.clone()))
             }))
             .chain(Task::done(Message::QuickHidden {
                 generation,
                 target,
                 restore,
-            }))
+            }));
+        self.guard_window_task(window)
     }
 
     pub(super) fn position_quick(
@@ -432,7 +484,7 @@ impl App {
         if !self.generation_is_current(generation) || self.quick.is_none() || self.window_hidden {
             return Task::none();
         }
-        iced::window::maximize(id, false)
+        let window = iced::window::maximize(id, false)
             .chain(iced::window::resize(id, size))
             .chain(
                 position
@@ -441,21 +493,27 @@ impl App {
             )
             .chain(iced::window::change_mode(id, iced::window::Mode::Windowed))
             .chain(iced::window::minimize(id, false))
-            .chain(Task::done(Message::QuickShown { generation, id }))
+            .chain(window_taskbar_role(
+                id,
+                false,
+                generation,
+                self.window_generation.clone(),
+            ))
+            .chain(Task::done(Message::QuickShown { generation, id }));
+        self.guard_window_task(window)
     }
 
     pub(super) fn focus_quick(&mut self, generation: u64, id: iced::window::Id) -> Task<Message> {
         if !self.generation_is_current(generation) || self.quick.is_none() || self.window_hidden {
-            return if self.window_hidden {
-                hide_window()
-            } else {
-                Task::none()
-            };
+            return Task::none();
         }
         self.window_id = Some(id);
         self.chrome_sync_pending = true;
         self.chrome_sync_attempts = 0;
-        iced::window::gain_focus(id).chain(text_input::focus(search_input_id()))
+        let focus = window_taskbar_role(id, false, generation, self.window_generation.clone())
+            .chain(iced::window::gain_focus(id))
+            .chain(text_input::focus(search_input_id()));
+        self.guard_window_task(focus)
     }
 
     pub(super) fn quick_hidden(
@@ -554,9 +612,10 @@ impl App {
                     // A pinned picker stays on screen while the paste is sent.
                     return paste;
                 }
+                self.advance_window_generation();
                 self.window_hidden = true;
                 self.set_history_active(false);
-                hide_window().chain(paste)
+                self.guard_window_task(hide_window().chain(paste))
             }
         }
     }
@@ -593,17 +652,20 @@ impl App {
             quick.error = Some(error);
             self.window_hidden = false;
             self.set_history_active(true);
-            activate_window(
-                self.window_generation
-                    .load(std::sync::atomic::Ordering::SeqCst),
-            )
+            let generation = self.advance_window_generation();
+            self.guard_window_task(activate_window(generation))
         } else {
             let size = self.restore_management_state();
-            self.advance_window_generation();
-            iced::window::get_latest().then(move |id| match (id, size) {
-                (Some(id), Some(size)) => iced::window::resize(id, size),
-                _ => Task::none(),
-            })
+            let generation = self.advance_window_generation();
+            let token = self.window_generation.clone();
+            let window = iced::window::get_latest().then(move |id| {
+                let Some(id) = id else { return Task::none() };
+                let resize = size
+                    .map(|size| iced::window::resize(id, size))
+                    .unwrap_or_else(Task::none);
+                resize.chain(window_taskbar_role(id, false, generation, token.clone()))
+            });
+            self.guard_window_task(window)
         }
     }
 
@@ -657,12 +719,20 @@ impl App {
         } else {
             iced::window::Level::Normal
         };
-        set_window_level(level)
+        let task = self.guard_window_task(set_window_level(level));
+        self.chrome_sync_pending = true;
+        self.chrome_sync_attempts = 0;
+        task
     }
 
     /// Fold the picker down to the title strip, or unfold it again. Folding
     /// pins the window, otherwise losing focus would close it immediately.
     pub(super) fn set_quick_folded(&mut self, folded: bool) -> Task<Message> {
+        let task = self.build_quick_folded(folded);
+        self.guard_window_task(task)
+    }
+
+    fn build_quick_folded(&mut self, folded: bool) -> Task<Message> {
         let window_size = self.window_size;
         let title_position = self.state.quick_settings.title_position;
         let Some(quick) = &mut self.quick else {
@@ -965,7 +1035,12 @@ impl App {
             .center_y(Length::Fill)
             .into()
         } else {
-            let mut rows = column![].spacing(0);
+            // The inter-card gap gives the quick list breathing room without
+            // padding each card's button: `row_height_with_lines` sizes the
+            // button to pure content, and `quick_row_height` (used for scroll
+            // math and window sizing) folds this same gap into the stride so
+            // the two stay in sync.
+            let mut rows = column![].spacing(metrics.row_gap);
             for (index, card) in self.state.cards.iter().enumerate() {
                 let source = match card.source_confidence {
                     veya_core::SourceConfidence::Exact => short_app(&card.source_app),
@@ -1757,9 +1832,12 @@ fn shift_window_y(dy: f32) -> Task<Message> {
     })
 }
 
-/// Row height for the configured number of preview lines per card, at the given font size.
+/// Vertical stride a quick-panel row occupies for scroll and window-sizing
+/// purposes: the card's button height plus the inter-card gap. The renderer
+/// lays cards out with the same stride, so keyboard-snap and resize math
+/// track the on-screen list exactly.
 fn quick_row_height(lines: u32, font_size: u32) -> f32 {
-    QuickMetrics::from_font_size(font_size).row_height_with_lines(lines)
+    QuickMetrics::from_font_size(font_size).row_stride_with_lines(lines)
 }
 
 /// Preview text clipped to `lines` lines, each line bounded like the single
@@ -1922,6 +2000,7 @@ pub(in crate::app) mod tests {
             quick: None,
             next_paste_request: 0,
             window_generation: Default::default(),
+            window_tasks: Vec::new(),
             last_paste_error: None,
             shared: Default::default(),
             worker: WorkerHandle { cmd_tx, event_rx },
@@ -1966,6 +2045,9 @@ pub(in crate::app) mod tests {
             chrome_sync_pending: false,
             chrome_sync_attempts: 0,
             updates: UpdateCheck::default(),
+            db_path_input: String::new(),
+            db_path_default: String::new(),
+            db_path_current: String::new(),
         }
     }
 
@@ -2441,6 +2523,92 @@ pub(in crate::app) mod tests {
         assert!(app.window_id.is_none());
         assert!(app.state.status_note.is_empty());
         assert!(app.quick.as_ref().unwrap().pending.is_none());
+    }
+
+    #[test]
+    fn rapid_toggle_aborts_old_window_tasks_before_the_next_session() {
+        // Phase 7 regression guard: opening the picker, dismissing it, then
+        // reopening must abort the in-flight window stream from the previous
+        // session so a late QuickShown/resize/position effect cannot land on
+        // the new panel. The generation counter alone is too late — the old
+        // task may already have queued an effect before its completion runs.
+        let mut app = isolated_app();
+        let _ = app.show_quick(None);
+        // Each guarded opening registers exactly one abortable handle.
+        assert_eq!(app.window_tasks.len(), 1);
+        let first = app
+            .window_generation
+            .load(std::sync::atomic::Ordering::SeqCst);
+        let _ = app.dismiss_quick(true);
+        // dismiss_quick pushes another guarded task (hide + resize + role).
+        assert_eq!(app.window_tasks.len(), 2);
+        let _ = app.show_quick(None);
+        // advance_window_generation drained and aborted both old handles
+        // before starting the new session, so only the fresh one remains.
+        assert_eq!(app.window_tasks.len(), 1);
+        assert!(app
+            .window_tasks
+            .iter()
+            .all(|handle| !handle.is_aborted()));
+        // The generation advanced twice (dismiss + reopen).
+        assert_ne!(
+            app.window_generation
+                .load(std::sync::atomic::Ordering::SeqCst),
+            first
+        );
+        assert!(app.quick.is_some());
+        assert!(!app.window_hidden);
+    }
+
+    #[test]
+    fn stale_window_restored_after_rapid_dismiss_keeps_the_window_hidden() {
+        // Phase 7 regression guard: a WindowRestored that belonged to the
+        // dismissed picker session must not flip window_hidden back to false
+        // or steal focus. The handler checks generation_is_current, so a late
+        // restore from the previous session returns Task::none() and leaves
+        // the hidden state intact.
+        let mut app = isolated_app();
+        let _ = app.show_quick(None);
+        let old = app
+            .window_generation
+            .load(std::sync::atomic::Ordering::SeqCst);
+        let _ = app.dismiss_quick(true);
+        assert!(app.window_hidden);
+        assert!(app.quick.is_none());
+        // A late restore from the dismissed session.
+        let _ = app.update(Message::WindowRestored {
+            id: iced::window::Id::unique(),
+            generation: old,
+        });
+        assert!(app.window_hidden);
+        assert!(app.quick.is_none());
+        // No history focus leaked through the stale restore.
+        assert!(!app.history_active);
+    }
+
+    #[test]
+    fn restoring_management_state_snapshots_the_saved_panel_size_immediately() {
+        // Phase 7 regression guard: when the picker is dismissed and then
+        // reopened before the native WindowResized event arrives, the manager
+        // size must come from the snapshot saved at open time, not the stale
+        // panel size still held in window_size. restore_management_state
+        // writes window_size synchronously so a subsequent open_manager sees
+        // the right dimensions.
+        let mut app = isolated_app();
+        let original = app.window_size;
+        app.window_size = iced::Size::new(QUICK_WIDTH, 320.0);
+        let _ = app.show_quick(None);
+        // While the panel is open window_size reflects the narrow panel; the
+        // saved ManagementState captured the original manager size.
+        assert_eq!(
+            app.quick.as_ref().unwrap().saved.size,
+            original
+        );
+        let _ = app.dismiss_quick(true);
+        // restore_management_state wrote the saved size back into window_size
+        // synchronously, so even before any WindowResized arrives the field
+        // holds the manager dimensions, not the panel's narrow width.
+        assert_eq!(app.window_size, original);
     }
 
     #[test]
