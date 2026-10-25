@@ -1,4 +1,4 @@
-﻿//! Iced shell: sidebar + search/filters + history list + flow detail.
+//! Iced shell: sidebar + search/filters + history list + flow detail.
 //! Layout precisely aligns with Fig 1 UI mockup: glowing cards, deep navy theme,
 //! unified vector icons, 4-action quick toolbar, dual source/flow cards,
 //! and clean non-redundant detail view + modular settings panel.
@@ -106,7 +106,8 @@ fn hide_window(
                     if let iced::window::raw_window_handle::RawWindowHandle::Win32(handle) =
                         handle.as_raw()
                     {
-                        let _ = veya_windows::platform::window_place::hide_window(handle.hwnd.get());
+                        let _ =
+                            veya_windows::platform::window_place::hide_window(handle.hwnd.get());
                     }
                 })
                 .then(|()| Task::none()),
@@ -984,7 +985,7 @@ impl App {
             Message::QuickSetHoverExpand(enabled) => {
                 let mut cfg = self.state.quick_settings.clone();
                 cfg.hover_expand_enabled = enabled;
-                self.state.quick_settings = cfg;
+                self.state.quick_settings = cfg.clone();
                 let _ = self.worker.cmd_tx.send(WorkerCmd::SetQuickSettings(cfg));
                 Task::none()
             }
@@ -1369,7 +1370,7 @@ impl App {
                     if !self.quick_settings_owned {
                         self.quick_settings_owned = true;
                     } else {
-                        next.quick_settings = self.state.quick_settings;
+                        next.quick_settings = self.state.quick_settings.clone();
                     }
                     self.state = next;
                 }
@@ -1570,7 +1571,7 @@ impl App {
             Message::QuickToggleMoveTop(on) => {
                 let mut cfg = self.state.quick_settings.clone();
                 cfg.move_to_top_after_paste = on;
-                self.state.quick_settings = cfg;
+                self.state.quick_settings = cfg.clone();
                 let _ = self.worker.cmd_tx.send(WorkerCmd::SetQuickSettings(cfg));
                 Task::none()
             }
@@ -1584,7 +1585,7 @@ impl App {
                         let mut cfg = self.state.quick_settings.clone();
                         cfg.display_lines = lines;
                         self.quick_lines_input = lines.to_string();
-                        self.state.quick_settings = cfg;
+                        self.state.quick_settings = cfg.clone();
                         let _ = self.worker.cmd_tx.send(WorkerCmd::SetQuickSettings(cfg));
                     }
                     None => {
@@ -1602,14 +1603,14 @@ impl App {
             Message::QuickSetPopupPos(position) => {
                 let mut cfg = self.state.quick_settings.clone();
                 cfg.popup_position = position;
-                self.state.quick_settings = cfg;
+                self.state.quick_settings = cfg.clone();
                 let _ = self.worker.cmd_tx.send(WorkerCmd::SetQuickSettings(cfg));
                 Task::none()
             }
             Message::QuickToggleAlwaysOnTop(on) => {
                 let mut cfg = self.state.quick_settings.clone();
                 cfg.always_on_top = on;
-                self.state.quick_settings = cfg;
+                self.state.quick_settings = cfg.clone();
                 // A live picker window follows the new level immediately.
                 let level = if on {
                     iced::window::Level::AlwaysOnTop
@@ -1626,7 +1627,7 @@ impl App {
             Message::QuickToggleAutoDismiss(on) => {
                 let mut cfg = self.state.quick_settings.clone();
                 cfg.auto_dismiss = on;
-                self.state.quick_settings = cfg;
+                self.state.quick_settings = cfg.clone();
                 let _ = self.worker.cmd_tx.send(WorkerCmd::SetQuickSettings(cfg));
                 Task::none()
             }
@@ -1640,7 +1641,7 @@ impl App {
                         let mut cfg = self.state.quick_settings.clone();
                         cfg.opacity = opacity;
                         self.quick_opacity_input = (opacity * 100.0).round().to_string();
-                        self.state.quick_settings = cfg;
+                        self.state.quick_settings = cfg.clone();
                         let _ = self.worker.cmd_tx.send(WorkerCmd::SetQuickSettings(cfg));
                         // Apply the new opacity to the shared window immediately so the
                         // settings page (where `self.quick` is `None`) gives live visual
@@ -1670,7 +1671,7 @@ impl App {
                 let mut cfg = self.state.quick_settings.clone();
                 cfg.font_size = size;
                 self.quick_font_size_input = size.to_string();
-                self.state.quick_settings = cfg;
+                self.state.quick_settings = cfg.clone();
                 let _ = self.worker.cmd_tx.send(WorkerCmd::SetQuickSettings(cfg));
                 Task::none()
             }
@@ -1680,7 +1681,7 @@ impl App {
                         let mut cfg = self.state.quick_settings.clone();
                         cfg.font_size = size;
                         self.quick_font_size_input = size.to_string();
-                        self.state.quick_settings = cfg;
+                        self.state.quick_settings = cfg.clone();
                         let _ = self.worker.cmd_tx.send(WorkerCmd::SetQuickSettings(cfg));
                     }
                     None => {
@@ -1698,14 +1699,14 @@ impl App {
             Message::QuickSetFontFamily(family) => {
                 let mut cfg = self.state.quick_settings.clone();
                 cfg.font_family = family;
-                self.state.quick_settings = cfg;
+                self.state.quick_settings = cfg.clone();
                 let _ = self.worker.cmd_tx.send(WorkerCmd::SetQuickSettings(cfg));
                 Task::none()
             }
             Message::QuickSetTitlePos(position) => {
                 let mut cfg = self.state.quick_settings.clone();
                 cfg.title_position = position;
-                self.state.quick_settings = cfg;
+                self.state.quick_settings = cfg.clone();
                 let _ = self.worker.cmd_tx.send(WorkerCmd::SetQuickSettings(cfg));
                 Task::none()
             }

@@ -43,7 +43,12 @@ impl<Message> Widget<Message, Theme, Renderer> for PageScroll<'_, Message> {
         self.content.as_widget().size_hint()
     }
 
-    fn layout(&self, tree: &mut Tree, renderer: &Renderer, limits: &layout::Limits) -> layout::Node {
+    fn layout(
+        &self,
+        tree: &mut Tree,
+        renderer: &Renderer,
+        limits: &layout::Limits,
+    ) -> layout::Node {
         self.content.as_widget().layout(tree, renderer, limits)
     }
 

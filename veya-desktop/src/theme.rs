@@ -500,7 +500,10 @@ pub fn card_button_quick(
 
 /// Narrow red bar at the left edge of a quick-paste row that has already been pasted.
 /// Rounded ends are used only where the marker does not join another pasted row.
-pub fn used_marker_style(joins_above: bool, joins_below: bool) -> impl Fn(&Theme) -> container::Style {
+pub fn used_marker_style(
+    joins_above: bool,
+    joins_below: bool,
+) -> impl Fn(&Theme) -> container::Style {
     move |_t: &Theme| {
         let radius = iced::border::Radius {
             top_left: if joins_above { 0.0 } else { 2.0 },

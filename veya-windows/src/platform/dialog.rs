@@ -165,8 +165,8 @@ mod native {
             COINIT_APARTMENTTHREADED,
         };
         use windows::Win32::UI::Shell::{
-            FileOpenDialog, IFileOpenDialog, FOS_FORCEFILESYSTEM, FOS_NOCHANGEDIR, FOS_PATHMUSTEXIST,
-            FOS_PICKFOLDERS, SIGDN_FILESYSPATH,
+            FileOpenDialog, IFileOpenDialog, FOS_FORCEFILESYSTEM, FOS_NOCHANGEDIR,
+            FOS_PATHMUSTEXIST, FOS_PICKFOLDERS, SIGDN_FILESYSPATH,
         };
 
         let title = wide(title);

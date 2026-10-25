@@ -37,7 +37,7 @@ impl DataJob {
 }
 
 /// Run blocking work (file dialogs, SQLite) off the UI thread.
-async fn run_blocking<T: Send + 'static>(
+pub(super) async fn run_blocking<T: Send + 'static>(
     work: impl FnOnce() -> T + Send + 'static,
 ) -> Result<T, String> {
     let (tx, rx) = iced::futures::channel::oneshot::channel();

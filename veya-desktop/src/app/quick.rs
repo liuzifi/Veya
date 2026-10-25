@@ -1,4 +1,4 @@
-﻿//! The hotkey picker reuses bounded worker history and typed clipboard replay.
+//! The hotkey picker reuses bounded worker history and typed clipboard replay.
 use super::history::card_menu_origin;
 use super::*;
 use crate::capture::QuickTitlePosition;
@@ -851,8 +851,11 @@ impl App {
         // outside the old bounds. A new enter increments the epoch and cancels it.
         quick.strip.hover_epoch = quick.strip.hover_epoch.wrapping_add(1);
         let epoch = quick.strip.hover_epoch;
-        iced::Task::future(iced::time::sleep(std::time::Duration::from_millis(100)))
-            .map(move |_| Message::QuickHoverFoldAfter(epoch))
+        // iced 0.13 has no timer future, so the wait runs on a short-lived helper thread.
+        Task::perform(
+            super::data::run_blocking(|| std::thread::sleep(std::time::Duration::from_millis(100))),
+            move |_| Message::QuickHoverFoldAfter(epoch),
+        )
     }
 
     pub(super) fn quick_hover_fold_after(&mut self, epoch: u64) -> Task<Message> {
@@ -1080,8 +1083,7 @@ impl App {
                     None => Space::with_width(Length::Fixed(metrics.number_column_width)).into(),
                 };
                 // Join pasted markers to the neighboring row when that row is also marked.
-                let pasted_above = index > 0
-                    && self.state.cards[index - 1].has_paste_activity;
+                let pasted_above = index > 0 && self.state.cards[index - 1].has_paste_activity;
                 let pasted_below = self
                     .state
                     .cards
@@ -2988,7 +2990,11 @@ pub(in crate::app) mod tests {
         let _ = app.update(Message::QuickHoverExpand);
         assert!(!strip(&app).folded);
         assert!(strip(&app).hover_expanded);
+        // Leaving only schedules the fold; it happens once the short delay has passed.
         let _ = app.update(Message::QuickHoverFold);
+        assert!(!strip(&app).folded && strip(&app).hover_expanded);
+        let epoch = strip(&app).hover_epoch;
+        let _ = app.update(Message::QuickHoverFoldAfter(epoch));
         assert!(strip(&app).folded);
         assert!(!strip(&app).hover_expanded);
     }
@@ -3039,6 +3045,8 @@ pub(in crate::app) mod tests {
                 }
             };
             let _ = app.update(Message::QuickHoverFold);
+            let epoch = strip(&app).hover_epoch;
+            let _ = app.update(Message::QuickHoverFoldAfter(epoch));
             assert!(strip(&app).folded);
             assert_eq!(strip(&app).expanded_size, full, "{position:?}");
             let _ = app.update(Message::QuickHoverExpand);

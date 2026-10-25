@@ -66,7 +66,10 @@ pub fn cjk_families() -> Vec<&'static str> {
 /// 验证并规范化持久化的字体名称；旧版 `default`/`mono` 键兼容回默认中文字体。
 pub fn resolve_cjk_family(value: &str) -> Option<&'static str> {
     if value == "default" || value == "mono" || value.trim().is_empty() {
-        return cjk_families().into_iter().next().or_else(|| Some("Microsoft YaHei UI"));
+        return cjk_families()
+            .into_iter()
+            .next()
+            .or_else(|| Some("Microsoft YaHei UI"));
     }
     cjk_families()
         .into_iter()
@@ -76,7 +79,10 @@ pub fn resolve_cjk_family(value: &str) -> Option<&'static str> {
 /// 为系统中已确认存在的中文字体创建 iced 字体描述；未知字体回退到微软雅黑。
 pub fn font_for_cjk_family(value: &str) -> Font {
     let name = resolve_cjk_family(value).unwrap_or("Microsoft YaHei UI");
-    Font { family: Family::Name(name), ..ui_font() }
+    Font {
+        family: Family::Name(name),
+        ..ui_font()
+    }
 }
 
 pub fn ui_font() -> Font {

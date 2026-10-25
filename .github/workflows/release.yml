@@ -37,14 +37,6 @@ jobs:
         continue-on-error: true
         run: cargo fmt --all -- --check
 
-      - name: Refresh Cargo.lock (allow feature-driven dependency updates)
-        shell: pwsh
-        run: |
-          # The repo may carry a committed Cargo.lock that lags behind feature
-          # changes (e.g. enabling iced `advanced`). Regenerate it from the
-          # network so the subsequent --locked build is reproducible.
-          cargo generate-lockfile
-
       - name: Test workspace
         shell: pwsh
         run: |

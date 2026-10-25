@@ -341,7 +341,11 @@ pub struct QuickFontFamily(String);
 
 impl QuickFontFamily {
     pub fn label(&self) -> &str {
-        if self.0 == "default" { "默认（系统中文字体）" } else { &self.0 }
+        if self.0 == "default" {
+            "默认（系统中文字体）"
+        } else {
+            &self.0
+        }
     }
 
     pub fn as_key(&self) -> &str {

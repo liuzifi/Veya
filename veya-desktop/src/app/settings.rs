@@ -336,9 +336,11 @@ impl App {
         };
         let font_family_chip =
             |current: &crate::capture::QuickFontFamily, want: crate::capture::QuickFontFamily| {
-                button(text(want.label()).size(12))
+                let selected = current == &want;
+                let label = want.label().to_owned();
+                button(text(label).size(12))
                     .on_press(Message::QuickSetFontFamily(want))
-                    .style(theme::chip_button(current == &want))
+                    .style(theme::chip_button(selected))
                     .padding(pad(6.0, 12.0, 6.0, 12.0))
             };
 
@@ -592,16 +594,20 @@ impl App {
             .spacing(2)
             .width(Length::Fill),
             button(text("−").size(16))
-                .on_press_maybe((quick.font_size > crate::capture::QuickSettings::MIN_FONT_SIZE)
-                    .then_some(Message::QuickSetFontSize(quick.font_size.saturating_sub(1))))
+                .on_press_maybe(
+                    (quick.font_size > crate::capture::QuickSettings::MIN_FONT_SIZE)
+                        .then_some(Message::QuickSetFontSize(quick.font_size.saturating_sub(1)))
+                )
                 .style(theme::action_button)
                 .padding(pad(4.0, 10.0, 4.0, 10.0)),
             container(text(format!("{} px", quick.font_size)).size(13))
                 .width(Length::Fixed(58.0))
                 .center_x(Length::Fill),
             button(text("+").size(16))
-                .on_press_maybe((quick.font_size < crate::capture::QuickSettings::MAX_FONT_SIZE)
-                    .then_some(Message::QuickSetFontSize(quick.font_size + 1)))
+                .on_press_maybe(
+                    (quick.font_size < crate::capture::QuickSettings::MAX_FONT_SIZE)
+                        .then_some(Message::QuickSetFontSize(quick.font_size + 1))
+                )
                 .style(theme::action_button)
                 .padding(pad(4.0, 10.0, 4.0, 10.0)),
         ]
@@ -611,9 +617,7 @@ impl App {
         let available_fonts = crate::capture::QuickFontFamily::available();
         let font_chips: Vec<Element<'_, Message>> = available_fonts
             .into_iter()
-            .map(|font| {
-                font_family_chip(&quick.font_family, font).into()
-            })
+            .map(|font| font_family_chip(&quick.font_family, font).into())
             .collect();
         let font_family_row = row![
             icons::icon(Icon::Code, theme::ACCENT(), 18.0),
