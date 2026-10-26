@@ -855,7 +855,7 @@ fn run_worker(
             theme_mode,
             max_items,
             expiry,
-            quick_settings,
+            quick_settings.clone(),
             store.list_groups().unwrap_or_default(),
         );
 
@@ -1207,7 +1207,7 @@ fn run_worker(
                         }
                     }
                     WorkerCmd::SetQuickSettings(settings) => {
-                        quick_settings = settings;
+                        quick_settings = settings.clone();
                         let _ = store.set_setting(
                             "quick_move_to_top",
                             if settings.move_to_top_after_paste {
@@ -1449,7 +1449,7 @@ fn run_worker(
                     theme_mode,
                     max_items,
                     expiry,
-                    quick_settings,
+                    quick_settings.clone(),
                     store.list_groups().unwrap_or_default(),
                 );
             }
@@ -1580,7 +1580,7 @@ fn run_worker(
                     theme_mode,
                     max_items,
                     expiry,
-                    quick_settings,
+                    quick_settings.clone(),
                     store.list_groups().unwrap_or_default(),
                 );
             }
