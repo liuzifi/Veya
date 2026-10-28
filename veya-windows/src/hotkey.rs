@@ -25,8 +25,9 @@ impl Hotkey {
 
     /// Supported combinations need at least one modifier and a non-reserved main key.
     pub fn new(modifiers: u32, key: u32) -> Option<Self> {
-        let valid_modifiers = modifiers != 0
-            && modifiers & !(MOD_ALT | MOD_CONTROL | MOD_SHIFT | MOD_WIN) == 0;
+        let valid_modifiers =
+            modifiers & !(MOD_ALT | MOD_CONTROL | MOD_SHIFT | MOD_WIN) == 0
+                && modifiers & (MOD_ALT | MOD_CONTROL | MOD_WIN) != 0;
         let valid_key = key == 0x20
             || (b'A' as u32..=b'Z' as u32).contains(&key)
             || (b'0' as u32..=b'9' as u32).contains(&key)
@@ -170,5 +171,18 @@ mod tests {
             assert_eq!(Hotkey::parse(shortcut), None, "{shortcut}");
         }
         assert_eq!(Hotkey::from_code(99), None);
+    }
+
+    #[test]
+    fn shift_alone_is_rejected_but_win_and_win_shift_are_accepted() {
+        // Bare Shift, no modifiers, and unknown modifier bits are rejected.
+        assert_eq!(Hotkey::new(MOD_SHIFT, b'V' as u32), None);
+        assert_eq!(Hotkey::new(0, b'V' as u32), None);
+        assert_eq!(Hotkey::new(MOD_SHIFT | 0x8000, b'V' as u32), None);
+
+        // Win, Win+Shift, and Alt+Shift are all accepted.
+        assert!(Hotkey::new(MOD_WIN, b'V' as u32).is_some());
+        assert!(Hotkey::new(MOD_WIN | MOD_SHIFT, b'V' as u32).is_some());
+        assert!(Hotkey::new(MOD_ALT | MOD_SHIFT, b'V' as u32).is_some());
     }
 }
