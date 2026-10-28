@@ -6,8 +6,8 @@
 use iced::keyboard::key::{Code, Named, Physical};
 use iced::keyboard::{Key, Modifiers};
 use iced::widget::{
-    button, column, container, mouse_area, opaque, pick_list, row, scrollable, stack, text,
-    text_input, tooltip, Space,
+    button, checkbox, column, container, mouse_area, opaque, pick_list, row, scrollable, stack,
+    text, text_input, tooltip, Space,
 };
 use iced::{Alignment, Color, Element, Length, Subscription, Task, Theme};
 use std::collections::HashMap;
@@ -35,6 +35,7 @@ mod settings;
 mod tracking;
 mod update;
 
+use settings::SettingsSection;
 use tracking::TrackingControl;
 use update::UpdateCheck;
 
@@ -369,6 +370,17 @@ pub struct App {
     card_menu: Option<CardMenu>,
     quick_group_sel: Option<i64>,
     quick_group_input: Option<QuickGroupInput>,
+    /// Group whose deletion is pending confirmation. `QuickRequestDeleteGroup`
+    /// shows a modal so the user can confirm or cancel before any records are
+    /// detached from the group.
+    quick_group_delete_pending: Option<i64>,
+    /// Card whose item hotkey is being recorded: the next key chord becomes its shortcut.
+    quick_item_hotkey_recording: Option<u32>,
+    /// Manager window size that a closed quick panel still owes the native window. Set when
+    /// the panel is dismissed and cleared once the dismissal finished resizing the window. If
+    /// another window is opened first the dismissal is aborted, and that opening must restore
+    /// the size itself or the manager would stay a panel-sized (or strip-sized) window.
+    manager_size_pending: Option<iced::Size>,
     /// Inline edit box for editing or creating a text card in the quick panel.
     quick_edit: Option<QuickEditState>,
     /// Sequence of the card whose properties panel is open.
@@ -456,7 +468,22 @@ pub enum Message {
     QuickHoverFoldAfter(u64),
     /// Enable/disable the "auto-expand on hover" setting.
     QuickSetHoverExpand(bool),
+    /// Show or hide the "copied from" application under each quick-panel row.
+    QuickSetShowSource(bool),
     QuickUnfocused,
+    /// Request deletion of a group: opens a confirmation dialog instead of
+    /// deleting immediately, so an accidental press of the trash button in the
+    /// group tab row can be undone.
+    QuickRequestDeleteGroup(i64),
+    /// Confirm the pending group deletion: detaches every record from the
+    /// group and removes the group tab.
+    QuickConfirmDeleteGroup(i64),
+    /// Cancel the pending group deletion and close the confirmation dialog.
+    QuickCancelDeleteGroup,
+    /// Toggle the "global scope" flag of a card's item hotkey.
+    QuickSetItemGlobal(u32, bool),
+    /// Start recording a key chord as the item hotkey for a card.
+    QuickStartItemHotkeyRecord(u32),
     QuickDeleteGroup(i64),
     QuickOpenCardMenu(u32),
     QuickCloseCardMenu,
@@ -544,7 +571,7 @@ pub enum Message {
     /// Snap the settings scrollable to a relative Y offset (0.0..=1.0).
     /// Emitted by the quick-positioning chips above the settings list so
     /// users can jump straight to a section without manual scrolling.
-    ScrollSettingsTo(f32),
+    ScrollSettingsTo(SettingsSection),
     ToggleRaw,
     ToggleDetailMenu,
     SetPinned {
@@ -683,6 +710,9 @@ impl App {
             card_menu: None,
             quick_group_sel: None,
             quick_group_input: None,
+            quick_group_delete_pending: None,
+            quick_item_hotkey_recording: None,
+            manager_size_pending: None,
             quick_edit: None,
             quick_properties: None,
             quick_edit_error: None,
@@ -888,7 +918,7 @@ impl App {
         let tick_interval = if self.window_hidden { 50 } else { 100 };
         let ticks = iced::time::every(std::time::Duration::from_millis(tick_interval))
             .map(|_| Message::Tick);
-        let keys = if self.hotkey_recording {
+        let keys = if self.hotkey_recording || self.quick_item_hotkey_recording.is_some() {
             iced::event::listen_with(record_hotkey_event)
         } else if self.quick.is_some() {
             iced::event::listen_with(quick::quick_event)
@@ -925,6 +955,18 @@ impl App {
                 Message::RecopySelected => Message::QuickEditCardSubmit,
                 Message::QuickDismiss { restore: true } => Message::QuickEditCardCancel,
                 Message::QuickMove(_) | Message::QuickPasteNth(_) => Message::QuickEditCardCancel,
+                other => other,
+            }
+        } else if self.quick_group_delete_pending.is_some() {
+            match message {
+                Message::RecopySelected => self
+                    .quick_group_delete_pending
+                    .map(Message::QuickConfirmDeleteGroup)
+                    .unwrap_or(Message::QuickCancelDeleteGroup),
+                Message::QuickDismiss { restore: true } => Message::QuickCancelDeleteGroup,
+                Message::QuickMove(_) | Message::QuickPasteNth(_) => {
+                    Message::QuickCancelDeleteGroup
+                }
                 other => other,
             }
         } else if self.quick_group_input.is_some() {
@@ -985,6 +1027,13 @@ impl App {
             Message::QuickSetHoverExpand(enabled) => {
                 let mut cfg = self.state.quick_settings.clone();
                 cfg.hover_expand_enabled = enabled;
+                self.state.quick_settings = cfg.clone();
+                let _ = self.worker.cmd_tx.send(WorkerCmd::SetQuickSettings(cfg));
+                Task::none()
+            }
+            Message::QuickSetShowSource(enabled) => {
+                let mut cfg = self.state.quick_settings.clone();
+                cfg.show_source = enabled;
                 self.state.quick_settings = cfg.clone();
                 let _ = self.worker.cmd_tx.send(WorkerCmd::SetQuickSettings(cfg));
                 Task::none()
@@ -1054,6 +1103,27 @@ impl App {
             Message::QuickGroupInputCancel => {
                 self.quick_group_input = None;
                 self.set_quick_error(None);
+                Task::none()
+            }
+            Message::QuickRequestDeleteGroup(id) => {
+                self.quick_group_delete_pending = Some(id);
+                self.card_menu = None;
+                Task::none()
+            }
+            Message::QuickConfirmDeleteGroup(id) => {
+                self.quick_group_delete_pending = None;
+                let _ = self.worker.cmd_tx.send(WorkerCmd::DeleteGroup { id });
+                // The rename box belongs to the group that is going away.
+                self.quick_group_input = None;
+                self.set_quick_error(None);
+                if self.quick_group_sel == Some(id) {
+                    self.quick_group_sel = None;
+                    return self.request_history_query(true);
+                }
+                Task::none()
+            }
+            Message::QuickCancelDeleteGroup => {
+                self.quick_group_delete_pending = None;
                 Task::none()
             }
             Message::QuickDeleteGroup(id) => {
@@ -1202,10 +1272,36 @@ impl App {
                     .send(WorkerCmd::SetAutoDelete { sequence, enabled });
                 Task::none()
             }
+            Message::QuickSetItemGlobal(sequence, enabled) => {
+                let card_code = self
+                    .state
+                    .cards
+                    .iter()
+                    .find(|card| card.sequence == sequence)
+                    .map(|card| card.item_hotkey.trim_start_matches("global:").to_string())
+                    .unwrap_or_default();
+                let code = if enabled {
+                    format!("global:{card_code}")
+                } else {
+                    card_code
+                };
+                let _ = self
+                    .worker
+                    .cmd_tx
+                    .send(WorkerCmd::SetItemHotkey { sequence, code });
+                Task::none()
+            }
+            Message::QuickStartItemHotkeyRecord(sequence) => {
+                self.quick_item_hotkey_recording = Some(sequence);
+                self.quick_properties = Some(sequence);
+                self.card_menu = None;
+                Task::none()
+            }
             Message::QuickSetItemHotkey(sequence, code) => {
                 // Conflict check: disallow setting the same hotkey as the global activation key.
                 if !code.is_empty() && code != "disabled" {
-                    if let Some(parsed) = Hotkey::parse(&code) {
+                    let bare = code.strip_prefix("global:").unwrap_or(&code);
+                    if let Some(parsed) = Hotkey::parse(bare) {
                         if parsed == self.state.hotkey_selected {
                             self.set_quick_error(Some("该快捷键已被全局激活键占用".into()));
                             return Task::none();
@@ -1744,18 +1840,7 @@ impl App {
                 self.set_history_active(p == Page::History && !self.window_hidden);
                 Task::none()
             }
-            Message::ScrollSettingsTo(y) => {
-                // Snap the settings scrollable to the calibrated relative
-                // offset emitted by the quick-positioning chips. `snap_to`
-                // auto-clamps to [0, content - viewport], so out-of-range
-                // offsets stay safe. The settings page is only rendered when
-                // the quick picker is closed, so we never compete with the
-                // quick-history scroll id.
-                scrollable::snap_to(
-                    scrollable::Id::new("settings-scroll"),
-                    scrollable::RelativeOffset { x: 0.0, y },
-                )
-            }
+            Message::ScrollSettingsTo(section) => self.scroll_settings_to(section),
             Message::ToggleRaw => {
                 let next = !self.state.expanded_raw;
                 self.state.expanded_raw = next;
@@ -1958,14 +2043,17 @@ impl App {
                 Task::none()
             }
             Message::CancelHotkeyRecord => {
+                self.quick_item_hotkey_recording = None;
                 self.cancel_hotkey_recording();
                 Task::none()
             }
             Message::RecordHotkeyKey(key, physical, modifiers) => {
-                if !self.hotkey_recording {
+                let item = self.quick_item_hotkey_recording;
+                if !self.hotkey_recording && item.is_none() {
                     return Task::none();
                 }
                 if matches!(key, Key::Named(Named::Escape)) {
+                    self.quick_item_hotkey_recording = None;
                     self.cancel_hotkey_recording();
                     return Task::none();
                 }
@@ -1985,8 +2073,36 @@ impl App {
                 if modifiers.shift() {
                     flags |= MOD_SHIFT;
                 }
+                if modifiers.logo() {
+                    flags |= veya_windows::hotkey::MOD_WIN;
+                }
                 let shortcut = recorded_key(&key, physical).and_then(|vk| Hotkey::new(flags, vk));
-                if let Some(shortcut) = shortcut.filter(|_| !modifiers.logo()) {
+                if let Some(sequence) = item {
+                    // Recording for a card's own shortcut, not the window activation key.
+                    return match shortcut {
+                        Some(shortcut) => {
+                            self.quick_item_hotkey_recording = None;
+                            let global = self.state.cards.iter().any(|card| {
+                                card.sequence == sequence && card.item_hotkey.starts_with("global:")
+                            });
+                            let code = shortcut.as_key();
+                            let code = if global {
+                                format!("global:{code}")
+                            } else {
+                                code
+                            };
+                            self.update(Message::QuickSetItemHotkey(sequence, code))
+                        }
+                        None => {
+                            self.set_quick_error(Some(
+                                "请按 Ctrl、Alt、Shift 或 Win + 字母、数字、Space 或 F1–F11；Esc 取消"
+                                    .into(),
+                            ));
+                            Task::none()
+                        }
+                    };
+                }
+                if let Some(shortcut) = shortcut {
                     self.hotkey_recording = false;
                     self.hotkey_record_error = None;
                     if self
@@ -2001,7 +2117,7 @@ impl App {
                     }
                 } else {
                     self.hotkey_record_error =
-                        Some("请按 Ctrl 或 Alt + 字母、数字、Space 或 F1–F11；Esc 取消".into());
+                        Some("请按 Ctrl、Alt、Shift 或 Win + 字母、数字、Space 或 F1–F11；Esc 取消".into());
                 }
                 Task::none()
             }

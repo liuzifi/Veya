@@ -546,6 +546,25 @@ impl App {
         .spacing(12)
         .align_y(Alignment::Center);
 
+        let show_source_row = row![
+            icons::icon(Icon::External, theme::ACCENT(), 18.0),
+            column![
+                body("显示来源应用").size(13).font(crate::font::name_font()),
+                meta("在快捷粘贴面板每条记录下方显示它是从哪个应用复制的；关闭后只显示复制时间")
+                    .size(11)
+                    .color(theme::MUTED()),
+            ]
+            .spacing(2)
+            .width(Length::Fill),
+            row![
+                flag_chip(quick.show_source, true, Message::QuickSetShowSource(true)),
+                flag_chip(quick.show_source, false, Message::QuickSetShowSource(false)),
+            ]
+            .spacing(6),
+        ]
+        .spacing(12)
+        .align_y(Alignment::Center);
+
         let title_pos_row = row![
             icons::icon(Icon::Search, theme::ACCENT(), 18.0),
             column![
@@ -669,6 +688,10 @@ impl App {
                 theme::hdivider(),
                 Space::with_height(12.0),
                 hover_expand_row,
+                Space::with_height(12.0),
+                theme::hdivider(),
+                Space::with_height(12.0),
+                show_source_row,
                 Space::with_height(12.0),
                 theme::hdivider(),
                 Space::with_height(12.0),
@@ -912,27 +935,27 @@ impl App {
 
         // Restrain content inside max width container (660px) to prevent horizontal stretching
         let settings_content = column![
-            section_label("隐私与剪贴板追踪"),
+            section_anchor(SettingsSection::Privacy, "隐私与剪贴板追踪"),
             Space::with_height(8.0),
             group_privacy,
             Space::with_height(20.0),
-            section_label("外观与存储策略"),
+            section_anchor(SettingsSection::Appearance, "外观与存储策略"),
             Space::with_height(8.0),
             group_appearance,
             Space::with_height(20.0),
-            section_label("窗口与快捷键"),
+            section_anchor(SettingsSection::Window, "窗口与快捷键"),
             Space::with_height(8.0),
             hotkey_group,
             Space::with_height(20.0),
-            section_label("快捷粘贴面板"),
+            section_anchor(SettingsSection::QuickPanel, "快捷粘贴面板"),
             Space::with_height(8.0),
             group_quick,
             Space::with_height(20.0),
-            section_label("数据管理与危险操作"),
+            section_anchor(SettingsSection::Data, "数据管理与危险操作"),
             Space::with_height(8.0),
             group_data,
             Space::with_height(20.0),
-            section_label("关于 Veya"),
+            section_anchor(SettingsSection::About, "关于 Veya"),
             Space::with_height(8.0),
             about_group,
             Space::with_height(32.0),
@@ -940,19 +963,16 @@ impl App {
         .spacing(0)
         .width(Length::Fixed(660.0));
 
-        // Quick-positioning navigation chips anchored above the scrollable
-        // content. Each chip snaps the settings scrollable to a calibrated
-        // RelativeOffset so users can jump straight to a section without
-        // manual scrolling. Offsets are tuned against the natural section
-        // heights and slightly biased upward so the section label sits just
-        // below the chip bar with a sliver of prior context.
+        // Navigation chips jump to the real position of each section heading (see
+        // `SectionOffset`), so they stay right when rows are added or a group grows.
+        // Wrapping keeps every destination reachable in compact settings windows.
         let nav_chips = row![
-            settings_nav_chip("隐私", 0.0),
-            settings_nav_chip("外观", 0.14),
-            settings_nav_chip("窗口", 0.27),
-            settings_nav_chip("快捷面板", 0.35),
-            settings_nav_chip("数据", 0.68),
-            settings_nav_chip("关于", 0.85),
+            settings_nav_chip("隐私", SettingsSection::Privacy),
+            settings_nav_chip("外观", SettingsSection::Appearance),
+            settings_nav_chip("窗口", SettingsSection::Window),
+            settings_nav_chip("快捷面板", SettingsSection::QuickPanel),
+            settings_nav_chip("数据", SettingsSection::Data),
+            settings_nav_chip("关于", SettingsSection::About),
         ]
         .spacing(6)
         .width(Length::Fixed(660.0));
@@ -963,7 +983,7 @@ impl App {
                 .align_x(Alignment::Center)
                 .padding(pad(10.0, 0.0, 30.0, 0.0)),
         )
-        .id(scrollable::Id::new("settings-scroll"))
+        .id(scrollable::Id::new(SETTINGS_SCROLL_ID))
         .style(theme::scroll_style)
         .height(Length::Fill)
         .into();
@@ -1145,15 +1165,228 @@ fn limit_row(spec: LimitRow<'_>) -> Element<'_, Message> {
     .into()
 }
 
-/// A compact chip used by the settings quick-positioning navigation bar.
+/// Id of the settings page's scrollable.
+const SETTINGS_SCROLL_ID: &str = "settings-scroll";
+
+/// Space kept above a section heading after jumping to it.
+const SECTION_LEAD: f32 = 8.0;
+
+/// A destination of the settings quick-navigation bar.
 ///
-/// Clicking the chip emits [`Message::ScrollSettingsTo`] carrying a
-/// calibrated relative Y offset (0.0..=1.0); the app's update handler then
-/// snaps the settings scrollable to that [`scrollable::RelativeOffset`].
-fn settings_nav_chip<'a>(label: &'a str, offset_y: f32) -> Element<'a, Message> {
+/// Every section heading is wrapped in a container with a stable id. A jump asks the layout
+/// where that container really is, instead of guessing a fraction of the scroll range, so it
+/// stays correct when rows are added, a group wraps or a confirmation box opens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsSection {
+    Privacy,
+    Appearance,
+    Window,
+    QuickPanel,
+    Data,
+    About,
+}
+
+impl SettingsSection {
+    #[cfg(test)]
+    pub(super) const ALL: [SettingsSection; 6] = [
+        Self::Privacy,
+        Self::Appearance,
+        Self::Window,
+        Self::QuickPanel,
+        Self::Data,
+        Self::About,
+    ];
+
+    fn container_id(self) -> iced::widget::container::Id {
+        iced::widget::container::Id::new(match self {
+            Self::Privacy => "settings-section-privacy",
+            Self::Appearance => "settings-section-appearance",
+            Self::Window => "settings-section-window",
+            Self::QuickPanel => "settings-section-quick-panel",
+            Self::Data => "settings-section-data",
+            Self::About => "settings-section-about",
+        })
+    }
+}
+
+/// A section heading that can be found by the navigation bar.
+fn section_anchor<'a>(section: SettingsSection, label: &'a str) -> Element<'a, Message> {
+    container(theme::section_label(label))
+        .id(section.container_id())
+        .into()
+}
+
+/// Finds where a section heading starts inside the settings scrollable's content.
+///
+/// Widget operations see the unscrolled layout, so the distance from the content's top edge to
+/// the heading is exactly the offset that brings it to the top of the viewport. The scrollable
+/// is visited before its children, so its content origin is known when the heading is reached.
+pub(super) struct SectionOffset {
+    scroll: iced::advanced::widget::Id,
+    target: iced::advanced::widget::Id,
+    content_top: Option<f32>,
+    found: Option<f32>,
+}
+
+impl SectionOffset {
+    pub(super) fn new(section: SettingsSection) -> Self {
+        Self {
+            scroll: scrollable::Id::new(SETTINGS_SCROLL_ID).into(),
+            target: section.container_id().into(),
+            content_top: None,
+            found: None,
+        }
+    }
+}
+
+impl iced::advanced::widget::Operation<f32> for SectionOffset {
+    fn container(
+        &mut self,
+        id: Option<&iced::advanced::widget::Id>,
+        bounds: iced::Rectangle,
+        operate_on_children: &mut dyn FnMut(&mut dyn iced::advanced::widget::Operation<f32>),
+    ) {
+        if let (Some(id), Some(top)) = (id, self.content_top) {
+            if *id == self.target {
+                self.found = Some((bounds.y - top).max(0.0));
+            }
+        }
+        operate_on_children(self);
+    }
+
+    fn scrollable(
+        &mut self,
+        _state: &mut dyn iced::advanced::widget::operation::Scrollable,
+        id: Option<&iced::advanced::widget::Id>,
+        _bounds: iced::Rectangle,
+        content_bounds: iced::Rectangle,
+        _translation: iced::Vector,
+    ) {
+        if id == Some(&self.scroll) {
+            self.content_top = Some(content_bounds.y);
+        }
+    }
+
+    fn finish(&self) -> iced::advanced::widget::operation::Outcome<f32> {
+        match self.found {
+            Some(offset) => iced::advanced::widget::operation::Outcome::Some(offset),
+            None => iced::advanced::widget::operation::Outcome::None,
+        }
+    }
+}
+
+impl App {
+    /// Scroll the settings page so that `section`'s heading is at the top of the view.
+    pub(super) fn scroll_settings_to(&self, section: SettingsSection) -> Task<Message> {
+        iced::advanced::widget::operate(SectionOffset::new(section)).then(|offset| {
+            scrollable::scroll_to(
+                scrollable::Id::new(SETTINGS_SCROLL_ID),
+                scrollable::AbsoluteOffset {
+                    x: 0.0,
+                    y: (offset - SECTION_LEAD).max(0.0),
+                },
+            )
+        })
+    }
+}
+
+/// A compact chip used by the settings quick-positioning navigation bar.
+/// The destination is a semantic section, not a guessed percentage, so the
+/// navigation target can be kept in sync with the rendered settings layout.
+fn settings_nav_chip<'a>(label: &'a str, section: SettingsSection) -> Element<'a, Message> {
     button(text(label).size(11).color(theme::MUTED()))
-        .on_press(Message::ScrollSettingsTo(offset_y))
+        .on_press(Message::ScrollSettingsTo(section))
         .style(theme::action_button)
         .padding(pad(4.0, 9.0, 4.0, 9.0))
         .into()
+}
+
+#[cfg(test)]
+mod nav_tests {
+    use super::super::quick::tests::isolated_app;
+    use super::*;
+    use iced::advanced::widget::operation;
+    use std::sync::{Arc, Mutex};
+
+    fn offset_of(app: &App, section: SettingsSection) -> Option<f32> {
+        let mut renderer = iced::Renderer::new(crate::font::ui_font(), iced::Pixels(16.0));
+        let mut ui = iced_runtime::UserInterface::build(
+            app.view(),
+            iced::Size::new(900.0, 700.0),
+            iced_runtime::user_interface::Cache::new(),
+            &mut renderer,
+        );
+        let found = Arc::new(Mutex::new(None));
+        let slot = found.clone();
+        let mut op = operation::map(SectionOffset::new(section), move |offset| {
+            *slot.lock().unwrap() = Some(offset);
+        });
+        ui.operate(&renderer, &mut op);
+        let _ = iced::advanced::widget::Operation::finish(&op);
+        let result = *found.lock().unwrap();
+        result
+    }
+
+    fn settings_app() -> App {
+        let mut app = isolated_app();
+        app.page = Page::Settings;
+        app
+    }
+
+    #[test]
+    fn every_section_heading_is_found_and_they_follow_each_other_in_order() {
+        let app = settings_app();
+        let offsets: Vec<f32> = SettingsSection::ALL
+            .iter()
+            .map(|section| {
+                offset_of(&app, *section).unwrap_or_else(|| panic!("{section:?} was not found"))
+            })
+            .collect();
+        for pair in offsets.windows(2) {
+            // Each group holds several rows, so headings are far apart, never overlapping.
+            assert!(pair[1] > pair[0] + 80.0, "{offsets:?}");
+        }
+        assert!(
+            offsets[0] < 40.0,
+            "the first heading is near the top: {offsets:?}"
+        );
+    }
+
+    #[test]
+    fn a_taller_section_pushes_only_the_headings_below_it() {
+        let mut app = settings_app();
+        let before: Vec<f32> = SettingsSection::ALL
+            .iter()
+            .map(|section| offset_of(&app, *section).unwrap())
+            .collect();
+        // The restore confirmation grows the data group; fixed fractions of the scroll range
+        // could not follow that.
+        app.data_job = super::data::DataJob::ConfirmRestore {
+            path: std::path::PathBuf::from("C:/backups/saved.db"),
+            info: veya_storage::BackupInfo {
+                records: 3,
+                groups: 1,
+                size_bytes: 4096,
+            },
+        };
+        let after: Vec<f32> = SettingsSection::ALL
+            .iter()
+            .map(|section| offset_of(&app, *section).unwrap())
+            .collect();
+        for index in 0..5 {
+            assert_eq!(
+                before[index], after[index],
+                "heading {index} is above the change"
+            );
+        }
+        assert!(after[5] > before[5] + 40.0, "{before:?} -> {after:?}");
+    }
+
+    #[test]
+    fn the_navigation_bar_is_only_part_of_the_settings_page() {
+        // On any other page there is no settings scrollable, so a jump has nothing to do.
+        let mut app = isolated_app();
+        app.page = Page::History;
+        assert_eq!(offset_of(&app, SettingsSection::Data), None);
+    }
 }

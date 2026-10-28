@@ -52,12 +52,18 @@ impl Engine {
         );
 
         let physical_bounds = quad.bounds * transformation;
+        let shadow = quad.shadow;
+        let shadow_bounds = quad_shadow_bounds(quad, transformation);
+        let visible_bounds = quad_visible_bounds(quad, transformation);
 
-        if !clip_bounds.intersects(&physical_bounds) {
+        if !clip_bounds.intersects(&visible_bounds) {
             return;
         }
 
-        let clip_mask = (!physical_bounds.is_within(&clip_bounds))
+        // The compositor clears only the current damage region. Every part of a
+        // quad, including its shadow, must obey that clip or translucent shadows
+        // are blended into stale pixels again during hover-only redraws.
+        let clip_mask = (!visible_bounds.is_within(&clip_bounds))
             .then_some(clip_mask as &_);
 
         let transform = into_transform(transformation);
@@ -79,16 +85,7 @@ impl Engine {
 
         let path = rounded_rectangle(quad.bounds, fill_border_radius);
 
-        let shadow = quad.shadow;
-
-        if shadow.color.a > 0.0 {
-            let shadow_bounds = Rectangle {
-                x: quad.bounds.x + shadow.offset.x - shadow.blur_radius,
-                y: quad.bounds.y + shadow.offset.y - shadow.blur_radius,
-                width: quad.bounds.width + shadow.blur_radius * 2.0,
-                height: quad.bounds.height + shadow.blur_radius * 2.0,
-            } * transformation;
-
+        if let Some(shadow_bounds) = shadow_bounds {
             let radii = fill_border_radius
                 .into_iter()
                 .map(|radius| radius * transformation.scale_factor())
@@ -154,7 +151,7 @@ impl Engine {
                     pixmap.as_ref(),
                     &tiny_skia::PixmapPaint::default(),
                     tiny_skia::Transform::default(),
-                    None,
+                    clip_mask,
                 );
             }
         }
@@ -810,6 +807,46 @@ fn smoothstep(a: f32, b: f32, x: f32) -> f32 {
     let x = ((x - a) / (b - a)).clamp(0.0, 1.0);
 
     x * x * (3.0 - 2.0 * x)
+}
+
+pub(crate) fn quad_shadow_bounds(
+    quad: &Quad,
+    transformation: Transformation,
+) -> Option<Rectangle> {
+    let shadow = quad.shadow;
+
+    (shadow.color.a > 0.0).then(|| {
+        Rectangle {
+            x: quad.bounds.x + shadow.offset.x - shadow.blur_radius,
+            y: quad.bounds.y + shadow.offset.y - shadow.blur_radius,
+            width: quad.bounds.width + shadow.blur_radius * 2.0,
+            height: quad.bounds.height + shadow.blur_radius * 2.0,
+        } * transformation
+    })
+}
+
+pub(crate) fn quad_visible_bounds(
+    quad: &Quad,
+    transformation: Transformation,
+) -> Rectangle {
+    let bounds = quad.bounds * transformation;
+
+    quad_shadow_bounds(quad, transformation)
+        .map_or(bounds, |shadow_bounds| rectangle_union(bounds, shadow_bounds))
+}
+
+pub(crate) fn rectangle_union(a: Rectangle, b: Rectangle) -> Rectangle {
+    let left = a.x.min(b.x);
+    let top = a.y.min(b.y);
+    let right = (a.x + a.width).max(b.x + b.width);
+    let bottom = (a.y + a.height).max(b.y + b.height);
+
+    Rectangle {
+        x: left,
+        y: top,
+        width: right - left,
+        height: bottom - top,
+    }
 }
 
 fn rounded_box_sdf(

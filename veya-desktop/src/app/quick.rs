@@ -236,7 +236,9 @@ impl App {
                     sort_order: self.sort_order,
                     history_page: self.history_page,
                     selected: self.state.selected,
-                    size: self.window_size,
+                    // A dismissal that was aborted before it resized the window leaves the
+                    // native window panel-sized while `window_size` already says otherwise.
+                    size: self.manager_size_pending.unwrap_or(self.window_size),
                 },
                 pending: None,
                 sending: false,
@@ -354,8 +356,18 @@ impl App {
         Task::batch([query, window])
     }
 
+    /// Size the shared window must have when the manager or settings page is shown: the size
+    /// saved by an open panel, or the size an aborted dismissal still owes. `None` only when
+    /// the window is already in its normal manager state, so nothing needs resizing.
+    fn manager_window_size(&mut self) -> Option<iced::Size> {
+        let owed = self.manager_size_pending.take();
+        self.restore_management_state().or(owed)
+    }
+
     fn restore_management_state(&mut self) -> Option<iced::Size> {
         let quick = self.quick.take()?;
+        self.quick_item_hotkey_recording = None;
+        self.quick_group_delete_pending = None;
         self.search = quick.saved.search;
         self.filter = quick.saved.filter;
         self.pinned_only = quick.saved.pinned_only;
@@ -375,7 +387,7 @@ impl App {
         let generation = self.advance_window_generation();
         apply_quick_opacity(1.0);
         let leave = self.leave_strip_state();
-        let size = self.restore_management_state();
+        let size = self.manager_window_size();
         self.window_hidden = false;
         self.page = Page::History;
         self.set_history_active(true);
@@ -402,7 +414,7 @@ impl App {
         let generation = self.advance_window_generation();
         apply_quick_opacity(1.0);
         let leave = self.leave_strip_state();
-        let size = self.restore_management_state();
+        let size = self.manager_window_size();
         self.window_hidden = false;
         self.page = Page::Settings;
         self.set_history_active(false);
@@ -455,6 +467,8 @@ impl App {
         apply_quick_opacity(1.0);
         let leave = self.leave_strip_state();
         let size = self.restore_management_state();
+        // Owed until the chain below finishes; `quick_hidden` settles it.
+        self.manager_size_pending = size;
         self.window_hidden = true;
         self.set_history_active(false);
         let token = self.window_generation.clone();
@@ -527,6 +541,10 @@ impl App {
         target: Option<PasteTarget>,
         restore: bool,
     ) -> Task<Message> {
+        if self.generation_is_current(generation) {
+            // The dismissal ran to its end, so the native window is back at the manager size.
+            self.manager_size_pending = None;
+        }
         if !self.generation_is_current(generation) || !self.window_hidden || !restore {
             return Task::none();
         }
@@ -1067,11 +1085,12 @@ impl App {
                     }
                     veya_core::SourceConfidence::Unknown => "来源未知".into(),
                 };
-                let mut metadata = row![
-                    meta(source).size(metrics.meta),
-                    meta(card.relative_time()).size(metrics.meta),
-                ]
-                .spacing(metrics.row_spacing);
+                // The source line is optional; the copy time and the pin mark always stay.
+                let mut metadata = row![].spacing(metrics.row_spacing);
+                if self.state.quick_settings.show_source {
+                    metadata = metadata.push(meta(source).size(metrics.meta));
+                }
+                metadata = metadata.push(meta(card.relative_time()).size(metrics.meta));
                 if card.pinned {
                     metadata = metadata.push(icons::icon(Icon::Pin, theme::ACCENT(), metrics.meta));
                 }
@@ -1215,7 +1234,15 @@ impl App {
             .unwrap_or_else(|| Space::new(Length::Fill, Length::Fill).into());
         let edit_overlay: Element<'_, Message> = self.quick_edit_overlay();
         let props_overlay: Element<'_, Message> = self.quick_properties_overlay();
-        stack([base, card_overlay, edit_overlay, props_overlay]).into()
+        let delete_overlay: Element<'_, Message> = self.quick_group_delete_confirmation_modal();
+        stack([
+            base,
+            card_overlay,
+            edit_overlay,
+            props_overlay,
+            delete_overlay,
+        ])
+        .into()
     }
 
     /// Title strip: close and fold buttons, then the draggable title. Blank
@@ -1653,6 +1680,71 @@ impl App {
         stack([dismiss.into(), centered.into()]).into()
     }
 
+    /// Group deletion confirmation modal. `QuickRequestDeleteGroup` opens it;
+    /// the user can keep editing if they cancel. Records inside the group are
+    /// never lost — they fall back to the "全部" tab — so the copy stresses
+    /// that only the grouping is removed.
+    fn quick_group_delete_confirmation_modal(&self) -> Element<'_, Message> {
+        let Some(id) = self.quick_group_delete_pending else {
+            return Space::new(Length::Fill, Length::Fill).into();
+        };
+        // Resolve the group name so the user can tell exactly which group the
+        // confirmation is about; fall back to a neutral label if the worker
+        // already removed it (e.g. a concurrent restore).
+        let name = self
+            .state
+            .groups
+            .iter()
+            .find(|g| g.id == id)
+            .map(|g| g.name.as_str())
+            .unwrap_or("该分组");
+        let dialog = container(
+            column![
+                row![
+                    icons::icon(Icon::Trash, theme::DANGER(), 20.0),
+                    column![
+                        body("删除分组？").size(15).font(crate::font::name_font()),
+                        meta(format!(
+                            "「{}」会被移除，但其中的记录会保留在「全部」标签下。",
+                            name
+                        ))
+                        .size(12)
+                        .color(theme::MUTED()),
+                    ]
+                    .spacing(5)
+                    .width(Length::Fill),
+                ]
+                .spacing(12)
+                .align_y(Alignment::Center),
+                theme::hdivider(),
+                row![
+                    Space::with_width(Length::Fill),
+                    button(meta("取消").size(12).color(theme::MUTED()))
+                        .on_press(Message::QuickCancelDeleteGroup)
+                        .style(theme::action_button)
+                        .padding(pad(8.0, 14.0, 8.0, 14.0)),
+                    button(text("删除").size(13))
+                        .on_press(Message::QuickConfirmDeleteGroup(id))
+                        .style(theme::danger_button)
+                        .padding(pad(8.0, 14.0, 8.0, 14.0)),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center),
+            ]
+            .spacing(12)
+            .width(Length::Fill),
+        )
+        .padding(pad(16.0, 18.0, 16.0, 18.0))
+        .width(Length::Fixed(320.0))
+        .style(theme::modal_panel_style);
+        let centered = container(dialog)
+            .center(Length::Fill)
+            .style(theme::modal_backdrop_style);
+        let dismiss = mouse_area(Space::new(Length::Fill, Length::Fill))
+            .on_press(Message::QuickCancelDeleteGroup);
+        stack([dismiss.into(), centered.into()]).into()
+    }
+
     /// Properties overlay: per-item hotkey, auto-delete toggle, pin position.
     fn quick_properties_overlay(&self) -> Element<'_, Message> {
         let Some(seq) = self.quick_properties else {
@@ -1739,48 +1831,64 @@ impl App {
         .padding(pad(8.0, 10.0, 8.0, 10.0))
         .style(theme::context_menu_item(false))
         .on_press(Message::QuickSetPinRank(seq, 2));
-        // Item hotkey display (read-only — editing is done via the item-hotkey
-        // input in the settings page; here we just show the current value and
-        // a button to clear it)
-        let hotkey_display: String = if card.item_hotkey.is_empty() {
-            "未设置".to_string()
-        } else {
-            format!("{}（点击清除）", card.item_hotkey)
-        };
-        let hotkey_btn = button(
-            row![
-                icons::icon(Icon::Settings, theme::MUTED(), 14.0),
-                text("条目快捷键").size(13),
-                Space::with_width(Length::Fill),
-                meta(hotkey_display).size(12).color(theme::MUTED()),
-            ]
+        // Item shortcuts are registered by the Windows message-only window.
+        // The stored prefix keeps scope explicit and backwards-compatible.
+        let recording = self.quick_item_hotkey_recording == Some(seq);
+        let hotkey_enabled = !card.item_hotkey.is_empty() || recording;
+        let hotkey_value = card
+            .item_hotkey
+            .strip_prefix("global:")
+            .unwrap_or(&card.item_hotkey);
+        let hotkey_enabled_cb = checkbox("启用条目快捷键", hotkey_enabled)
+            .size(14)
             .spacing(9)
-            .align_y(Alignment::Center),
+            .on_toggle(move |enabled| {
+                if enabled {
+                    Message::QuickStartItemHotkeyRecord(seq)
+                } else {
+                    Message::QuickSetItemHotkey(seq, String::new())
+                }
+            });
+        let hotkey_global_cb: Element<'_, Message> = checkbox(
+            "全局生效（其他应用前台时也可触发）",
+            card.item_hotkey.starts_with("global:"),
         )
-        .width(Length::Fill)
-        .padding(pad(8.0, 10.0, 8.0, 10.0))
-        .style(theme::context_menu_item(false));
-        // Pressing the row clears an existing hotkey; with none set there is nothing to do.
-        let hotkey_btn = if card.item_hotkey.is_empty() {
-            hotkey_btn
-        } else {
-            hotkey_btn.on_press(Message::QuickSetItemHotkey(seq, String::new()))
-        };
+        .size(14)
+        .spacing(9)
+        .on_toggle(move |enabled| Message::QuickSetItemGlobal(seq, enabled))
+        .into();
         let close_btn = button(text("关闭").size(13))
             .padding(pad(8.0, 14.0, 8.0, 14.0))
             .style(theme::action_button)
             .on_press(Message::QuickCloseProperties);
+        let hotkey_detail: Element<'_, Message> = if recording {
+            text("请按下快捷键组合（Esc 取消）")
+                .size(12)
+                .color(theme::ACCENT())
+                .into()
+        } else if hotkey_enabled {
+            column![
+                text(format!("快捷键：{}", hotkey_value))
+                    .size(12)
+                    .color(theme::MUTED()),
+                hotkey_global_cb,
+            ]
+            .spacing(6)
+            .into()
+        } else {
+            Space::new(Length::Fill, Length::Shrink).into()
+        };
         let content = column![
             meta("条目属性").size(14),
             theme::hdivider(),
             auto_delete_btn,
+            hotkey_enabled_cb,
+            hotkey_detail,
             theme::hdivider(),
             pin_label,
             pin_unpinned,
             pin_top,
             pin_bottom,
-            theme::hdivider(),
-            hotkey_btn,
             theme::hdivider(),
             row![Space::with_width(Length::Fill), close_btn]
                 .spacing(8)
@@ -2060,6 +2168,9 @@ pub(in crate::app) mod tests {
             quick_edit: None,
             quick_properties: None,
             quick_edit_error: None,
+            quick_group_delete_pending: None,
+            quick_item_hotkey_recording: None,
+            manager_size_pending: None,
             cursor_position: iced::Point::ORIGIN,
             window_size: iced::Size::new(1080.0, 700.0),
             content_modal_for: None,
@@ -3119,5 +3230,221 @@ pub(in crate::app) mod tests {
             (Some(7), "hello 世界")
         );
         assert!(app.quick.as_ref().unwrap().error.is_none());
+    }
+
+    #[test]
+    fn opening_settings_right_after_a_dismissal_still_restores_the_manager_size() {
+        // The dismissal's native work (hide, resize back, final hide) runs as a stream.
+        // Opening another window advances the generation and aborts it, possibly before the
+        // resize ran, and by then `quick` is already gone. The window must still end up at
+        // the manager size instead of staying a panel or a strip.
+        for open in ["manager", "settings"] {
+            let mut app = isolated_app();
+            let manager_size = app.window_size;
+            let _ = app.show_quick(None);
+            let _dismissal_never_ran = app.dismiss_quick(true);
+            assert!(app.quick.is_none());
+            let task = if open == "settings" {
+                app.open_settings()
+            } else {
+                app.open_manager()
+            };
+            let actions = window_actions(task);
+            assert!(
+                actions.contains(&"resize"),
+                "{open}: the window was never resized back to {manager_size:?}: {actions:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_folded_strip_is_restored_too_when_settings_open_after_an_aborted_dismissal() {
+        let mut app = isolated_app();
+        let _ = app.show_quick(None);
+        let _ = app.update(Message::QuickToggleFold);
+        let _never_ran = app.dismiss_quick(true);
+        let actions = window_actions(app.open_settings());
+        assert!(actions.contains(&"resize"), "{actions:?}");
+        assert!(
+            app.manager_size_pending.is_none(),
+            "the owed size is paid once"
+        );
+    }
+
+    #[test]
+    fn a_dismissal_that_ran_to_its_end_owes_nothing() {
+        let mut app = isolated_app();
+        let _ = app.show_quick(None);
+        let _ = app.dismiss_quick(true);
+        assert_eq!(
+            app.manager_size_pending,
+            Some(iced::Size::new(1080.0, 700.0))
+        );
+        let generation = app
+            .window_generation
+            .load(std::sync::atomic::Ordering::SeqCst);
+        let _ = app.update(Message::QuickHidden {
+            generation,
+            target: None,
+            restore: false,
+        });
+        assert_eq!(app.manager_size_pending, None);
+        // Nothing is owed, so a normal manager opening does not resize the window again.
+        let actions = window_actions(app.open_manager());
+        assert!(!actions.contains(&"resize"), "{actions:?}");
+    }
+
+    #[test]
+    fn a_stale_native_size_cannot_become_the_saved_manager_size() {
+        let mut app = isolated_app();
+        let manager = app.window_size;
+        let _ = app.show_quick(None);
+        let _never_ran = app.dismiss_quick(true);
+        // A late resize event from the aborted dismissal reports the panel size.
+        app.window_size = iced::Size::new(QUICK_WIDTH, 28.0);
+        let _ = app.show_quick(None);
+        assert_eq!(app.quick.as_ref().unwrap().saved.size, manager);
+    }
+
+    #[test]
+    fn the_source_switch_updates_the_setting_and_tells_the_worker() {
+        let (mut app, rx) = ready_text_app();
+        while rx.try_recv().is_ok() {}
+        assert!(app.state.quick_settings.show_source);
+        let _ = app.update(Message::QuickSetShowSource(false));
+        assert!(!app.state.quick_settings.show_source);
+        let mut sent = None;
+        while let Ok(command) = rx.try_recv() {
+            if let WorkerCmd::SetQuickSettings(settings) = command {
+                sent = Some(settings.show_source);
+            }
+        }
+        assert_eq!(sent, Some(false), "the worker must persist the new value");
+        let _ = app.update(Message::QuickSetShowSource(true));
+        assert!(app.state.quick_settings.show_source);
+    }
+
+    #[test]
+    fn the_panel_renders_with_and_without_the_source_line() {
+        for show in [true, false] {
+            let (mut app, _rx) = ready_text_app();
+            app.state.quick_settings.show_source = show;
+            let _ = app.show_quick(None);
+            render_at(&app, iced::Size::new(QUICK_WIDTH, QUICK_HEIGHT));
+        }
+    }
+
+    fn item_hotkey_sent(rx: &std::sync::mpsc::Receiver<WorkerCmd>) -> Option<(u32, String)> {
+        let mut sent = None;
+        while let Ok(command) = rx.try_recv() {
+            if let WorkerCmd::SetItemHotkey { sequence, code } = command {
+                sent = Some((sequence, code));
+            }
+        }
+        sent
+    }
+
+    fn press(key: Key, code: Code, modifiers: Modifiers) -> Message {
+        Message::RecordHotkeyKey(key, Physical::Code(code), modifiers)
+    }
+
+    #[test]
+    fn recording_an_item_hotkey_stores_the_chord_it_hears() {
+        let (mut app, rx) = ready_text_app();
+        let _ = app.show_quick(None);
+        while rx.try_recv().is_ok() {}
+        let _ = app.update(Message::QuickStartItemHotkeyRecord(1));
+        assert_eq!(app.quick_item_hotkey_recording, Some(1));
+        assert_eq!(app.quick_properties, Some(1));
+
+        // A modifier on its own keeps waiting for the actual key.
+        let _ = app.update(press(
+            Key::Named(Named::Control),
+            Code::ControlLeft,
+            Modifiers::CTRL,
+        ));
+        assert_eq!(app.quick_item_hotkey_recording, Some(1));
+        assert_eq!(item_hotkey_sent(&rx), None);
+
+        let _ = app.update(press(
+            Key::Character("k".into()),
+            Code::KeyK,
+            Modifiers::CTRL,
+        ));
+        assert_eq!(app.quick_item_hotkey_recording, None);
+        let (sequence, code) = item_hotkey_sent(&rx).expect("the shortcut was stored");
+        assert_eq!(sequence, 1);
+        assert_eq!(Hotkey::parse(&code), Hotkey::new(MOD_CONTROL, b'K' as u32));
+        assert!(!app.hotkey_recording, "the window hotkey is not involved");
+    }
+
+    #[test]
+    fn escape_cancels_item_hotkey_recording_and_an_invalid_chord_keeps_waiting() {
+        let (mut app, rx) = ready_text_app();
+        let _ = app.show_quick(None);
+        while rx.try_recv().is_ok() {}
+        let _ = app.update(Message::QuickStartItemHotkeyRecord(1));
+
+        // A bare letter is not a usable shortcut: say so and keep listening.
+        let _ = app.update(press(
+            Key::Character("k".into()),
+            Code::KeyK,
+            Modifiers::empty(),
+        ));
+        assert_eq!(app.quick_item_hotkey_recording, Some(1));
+        assert!(app.quick.as_ref().unwrap().error.is_some());
+        assert_eq!(item_hotkey_sent(&rx), None);
+
+        let _ = app.update(press(
+            Key::Named(Named::Escape),
+            Code::Escape,
+            Modifiers::empty(),
+        ));
+        assert_eq!(app.quick_item_hotkey_recording, None);
+        assert_eq!(item_hotkey_sent(&rx), None);
+    }
+
+    #[test]
+    fn a_global_item_hotkey_keeps_its_scope_when_it_is_rerecorded() {
+        let (mut app, rx) = ready_text_app();
+        let _ = app.show_quick(None);
+        let mut card = app.state.cards[0].clone();
+        card.item_hotkey = "global:Ctrl+J".into();
+        app.state.cards = vec![card].into();
+        while rx.try_recv().is_ok() {}
+        let _ = app.update(Message::QuickStartItemHotkeyRecord(1));
+        let _ = app.update(press(
+            Key::Character("k".into()),
+            Code::KeyK,
+            Modifiers::CTRL,
+        ));
+        let (_, code) = item_hotkey_sent(&rx).expect("stored");
+        assert!(code.starts_with("global:"), "{code}");
+        assert_eq!(
+            Hotkey::parse(code.trim_start_matches("global:")),
+            Hotkey::new(MOD_CONTROL, b'K' as u32)
+        );
+    }
+
+    #[test]
+    fn an_item_hotkey_may_not_reuse_the_window_activation_key_even_when_global() {
+        let (mut app, rx) = ready_text_app();
+        let _ = app.show_quick(None);
+        while rx.try_recv().is_ok() {}
+        let taken = app.state.hotkey_selected.as_key();
+        let _ = app.update(Message::QuickSetItemHotkey(1, format!("global:{taken}")));
+        assert_eq!(item_hotkey_sent(&rx), None);
+        assert!(app.quick.as_ref().unwrap().error.is_some());
+    }
+
+    #[test]
+    fn leaving_the_panel_drops_an_unfinished_recording_and_a_pending_group_delete() {
+        let (mut app, _rx) = ready_text_app();
+        let _ = app.show_quick(None);
+        let _ = app.update(Message::QuickStartItemHotkeyRecord(1));
+        app.quick_group_delete_pending = Some(3);
+        let _ = app.dismiss_quick(true);
+        assert_eq!(app.quick_item_hotkey_recording, None);
+        assert_eq!(app.quick_group_delete_pending, None);
     }
 }

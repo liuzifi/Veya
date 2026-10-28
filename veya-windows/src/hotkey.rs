@@ -1,8 +1,9 @@
-//! User-selectable global window activation shortcuts.
+//! User-selectable global window activation shortcuts, including Windows-key chords.
 
 pub const MOD_ALT: u32 = 0x1;
 pub const MOD_CONTROL: u32 = 0x2;
 pub const MOD_SHIFT: u32 = 0x4;
+pub const MOD_WIN: u32 = 0x8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Hotkey {
@@ -22,11 +23,10 @@ impl Hotkey {
         key: b'V' as u32,
     };
 
-    /// Supported combinations need Ctrl or Alt and a non-reserved main key.
+    /// Supported combinations need at least one modifier and a non-reserved main key.
     pub fn new(modifiers: u32, key: u32) -> Option<Self> {
         let valid_modifiers = modifiers != 0
-            && modifiers & !(MOD_ALT | MOD_CONTROL | MOD_SHIFT) == 0
-            && modifiers & (MOD_ALT | MOD_CONTROL) != 0;
+            && modifiers & !(MOD_ALT | MOD_CONTROL | MOD_SHIFT | MOD_WIN) == 0;
         let valid_key = key == 0x20
             || (b'A' as u32..=b'Z' as u32).contains(&key)
             || (b'0' as u32..=b'9' as u32).contains(&key)
@@ -52,6 +52,7 @@ impl Hotkey {
                 "alt" => modifiers |= MOD_ALT,
                 "ctrl" | "control" => modifiers |= MOD_CONTROL,
                 "shift" => modifiers |= MOD_SHIFT,
+                "win" | "windows" | "super" => modifiers |= MOD_WIN,
                 "space" if key.is_none() => key = Some(0x20),
                 _ if key.is_none() => {
                     if part.len() == 1 {
@@ -115,6 +116,9 @@ impl std::fmt::Display for Hotkey {
         let Self::Keys { modifiers, key } = self else {
             return f.write_str("关闭快捷键");
         };
+        if modifiers & MOD_WIN != 0 {
+            f.write_str("Win+")?;
+        }
         if modifiers & MOD_CONTROL != 0 {
             f.write_str("Ctrl+")?;
         }
@@ -144,6 +148,8 @@ mod tests {
             "Ctrl+Alt+7",
             "Alt+F9",
             "Ctrl+Space",
+            "Win+V",
+            "Ctrl+Win+K",
         ] {
             let hotkey = Hotkey::parse(shortcut).expect(shortcut);
             assert_eq!(Hotkey::from_key(&hotkey.as_key()), hotkey);
@@ -160,9 +166,7 @@ mod tests {
 
     #[test]
     fn rejects_unintended_single_keys_and_reserved_f12_or_alt_f4() {
-        for shortcut in [
-            "V", "F3", "Shift+V", "Alt+F4", "Ctrl+F12", "Win+V", "Alt+?", "Alt+",
-        ] {
+        for shortcut in ["V", "F3", "Shift+V", "Alt+F4", "Ctrl+F12", "Alt+?", "Alt+"] {
             assert_eq!(Hotkey::parse(shortcut), None, "{shortcut}");
         }
         assert_eq!(Hotkey::from_code(99), None);

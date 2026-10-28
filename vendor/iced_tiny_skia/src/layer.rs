@@ -182,8 +182,8 @@ impl Layer {
         let mut damage = damage::list(
             &previous.quads,
             &current.quads,
-            |(quad, _)| {
-                quad.bounds
+            |(quad, transformation)| {
+                crate::engine::quad_visible_bounds(quad, *transformation)
                     .expand(1.0)
                     .intersection(&current.bounds)
                     .into_iter()

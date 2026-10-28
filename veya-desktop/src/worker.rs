@@ -242,6 +242,7 @@ fn load_quick_settings(store: &Store) -> QuickSettings {
         setting("quick_font_size").as_deref(),
         setting("quick_font_family").as_deref(),
         setting("quick_hover_expand_enabled").as_deref(),
+        setting("quick_show_source").as_deref(),
     )
 }
 
@@ -1244,6 +1245,10 @@ fn run_worker(
                             } else {
                                 "0"
                             },
+                        );
+                        let _ = store.set_setting(
+                            "quick_show_source",
+                            if settings.show_source { "1" } else { "0" },
                         );
                     }
                     WorkerCmd::RestoreDatabase { path } => {

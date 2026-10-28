@@ -393,6 +393,8 @@ pub struct QuickSettings {
     pub font_family: QuickFontFamily,
     /// Auto-expand a folded panel when the pointer enters the title strip.
     pub hover_expand_enabled: bool,
+    /// Show, under each row, the application the text was copied from.
+    pub show_source: bool,
 }
 
 impl Default for QuickSettings {
@@ -408,6 +410,7 @@ impl Default for QuickSettings {
             font_size: Self::DEFAULT_FONT_SIZE,
             font_family: QuickFontFamily::from_key("default"),
             hover_expand_enabled: true,
+            show_source: true,
         }
     }
 }
@@ -459,6 +462,7 @@ impl QuickSettings {
         font_size: Option<&str>,
         font_family: Option<&str>,
         hover_expand_enabled: Option<&str>,
+        show_source: Option<&str>,
     ) -> Self {
         Self {
             move_to_top_after_paste: move_to_top == Some("1"),
@@ -484,6 +488,7 @@ impl QuickSettings {
                 .map(QuickFontFamily::from_key)
                 .unwrap_or_else(|| QuickFontFamily::from_key("default")),
             hover_expand_enabled: hover_expand_enabled.map(|s| s != "0").unwrap_or(true),
+            show_source: show_source.map(|s| s != "0").unwrap_or(true),
         }
     }
 }
@@ -727,6 +732,21 @@ mod tests {
             used_in: Vec::new(),
             last_created_at_ms: 1,
         }
+    }
+
+    #[test]
+    fn the_source_line_is_shown_unless_it_was_switched_off() {
+        let parse = |show: Option<&str>| {
+            QuickSettings::from_settings(
+                None, None, None, None, None, None, None, None, None, None, show,
+            )
+            .show_source
+        };
+        assert!(QuickSettings::default().show_source);
+        assert!(parse(None), "unset keeps the original behaviour");
+        assert!(parse(Some("1")));
+        assert!(!parse(Some("0")));
+        assert!(parse(Some("garbage")), "only an explicit 0 turns it off");
     }
 
     #[test]
